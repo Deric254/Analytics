@@ -21,14 +21,14 @@ jobs:
       - name: Validate HF_TOKEN
         run: |
           if [ -z "${{ secrets.HF_TOKEN }}" ]; then
-            echo "❌ HF_TOKEN secret is missing in GitHub Secrets"
+            echo "HF_TOKEN secret is missing"
             exit 1
           fi
-          echo "✅ HF_TOKEN found"
+          echo "HF_TOKEN found"
 
       - name: Configure git
         run: |
-          git config --global user.name  "github-actions[bot]"
+          git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git lfs install
 
@@ -37,4 +37,4 @@ jobs:
           cd repo
           git remote add space "https://deric254:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/deric254/dericbi-analytics"
           git push --force space HEAD:main
-          echo "✅ Live at https://huggingface.co/spaces/deric254/dericbi-analytics"
+          echo "Done - live at https://huggingface.co/spaces/deric254/dericbi-analytics"
