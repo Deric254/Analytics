@@ -1,32 +1,58 @@
-name: Sync GitHub to HF Space
+name: Sync to Hugging Face Space
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  workflow_dispatch:  # allows manual trigger from GitHub Actions tab
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true        # fetch any LFS files too
 
-      - name: Push to Hugging Face Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      - name: Install Git LFS
         run: |
-          if [ -z "$HF_TOKEN" ]; then
-            echo "HF_TOKEN secret is missing."
+          git lfs install
+          echo "✅ Git LFS ready"
+
+      - name: Validate HF_TOKEN secret exists
+        run: |
+          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
+            echo "❌ ERROR: HF_TOKEN secret is missing."
+            echo "Go to: GitHub repo → Settings → Secrets and variables → Actions → New repository secret"
+            echo "Name: HF_TOKEN   Value: your Hugging Face WRITE token"
             exit 1
           fi
+          echo "✅ HF_TOKEN found"
 
-          git config user.name "github-actions[bot]"
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git remote add space "https://deric254:${HF_TOKEN}@huggingface.co/spaces/deric254/dericbi-analytics"
+      - name: Add Hugging Face Space as remote
+        run: |
+          # Remove stale remote if it exists from a previous run
+          git remote remove space 2>/dev/null || true
+          git remote add space "https://deric254:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/deric254/dericbi-analytics"
+          echo "✅ Remote added"
+
+      - name: Push to Hugging Face Space
+        run: |
+          echo "🚀 Pushing to Hugging Face Space..."
           git push --force space HEAD:main
+          echo "✅ Push complete — Space is building"
+
+      - name: Done
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Deployed to: https://huggingface.co/spaces/deric254/dericbi-analytics"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
