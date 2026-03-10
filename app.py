@@ -2,6 +2,9 @@ import dash
 from dash import html, dcc, Input, Output, State
 import dash_bootstrap_components as dbc
 import os
+import threading
+import time
+import requests as req
 from flask import request, redirect
 from config.settings import DERICBI_LOGO, DERICBI_SLOGAN
 
@@ -13,6 +16,27 @@ app = dash.Dash(
     suppress_callback_exceptions=True
 )
 server = app.server
+
+# ── Self keep-alive — pings own /ping every 10 minutes so Render never sleeps ─
+def _keep_alive():
+    """Runs in background thread. Pings this app every 10 min to prevent sleep."""
+    # Wait 60s after startup before first ping so app is fully ready
+    time.sleep(60)
+    port = int(os.getenv("PORT", "10000"))
+    url  = f"http://0.0.0.0:{port}/ping"
+    while True:
+        try:
+            req.get(url, timeout=10)
+        except Exception:
+            pass  # silently ignore — app may be busy, next ping will succeed
+        time.sleep(600)  # ping every 10 minutes
+
+threading.Thread(target=_keep_alive, daemon=True).start()
+
+# ── Ping endpoint — lightweight health check ──────────────────────────────────
+@server.route("/ping")
+def ping():
+    return "pong", 200
 
 # Sidebar navigation
 sidebar = html.Div(
@@ -27,12 +51,12 @@ sidebar = html.Div(
         html.P(DERICBI_SLOGAN, className="lead"),
         dbc.Nav(
             [
-                dbc.NavLink("Ingestion", href="/ingestion", active="exact"),
-                dbc.NavLink("Cleaning", href="/cleaning", active="exact"),
-                dbc.NavLink("Exploration", href="/exploration", active="exact"),
+                dbc.NavLink("Ingestion",     href="/ingestion",     active="exact"),
+                dbc.NavLink("Cleaning",      href="/cleaning",      active="exact"),
+                dbc.NavLink("Exploration",   href="/exploration",   active="exact"),
                 dbc.NavLink("Visualization", href="/visualization", active="exact"),
-                dbc.NavLink("Insights", href="/insights", active="exact"),
-                dbc.NavLink("Reporting", href="/reporting", active="exact"),
+                dbc.NavLink("Insights",      href="/insights",      active="exact"),
+                dbc.NavLink("Reporting",     href="/reporting",     active="exact"),
             ],
             className="analytics-sidebar-nav",
             vertical=True,
@@ -56,7 +80,7 @@ sidebar = html.Div(
 # Overlay for mobile sidebar
 sidebar_overlay = html.Div(id="sidebar-overlay", className="sidebar-overlay")
 
-# Top header (matches sidebar formatting)
+# Top header
 header = html.Div(
     [
         html.Div(
@@ -115,7 +139,7 @@ header = html.Div(
 # Content area
 content = html.Div(
     [
-        dash.page_container  # This loads whichever page is active
+        dash.page_container
     ],
     style={
         "marginLeft": "18rem",
@@ -128,9 +152,9 @@ content = html.Div(
 # App layout
 app.layout = html.Div([
     dcc.Location(id="url", refresh=False),
-    dcc.Store(id="shared-dataset", storage_type="session"),
+    dcc.Store(id="shared-dataset",      storage_type="session"),
     dcc.Store(id="shared-visual-config", storage_type="session"),
-    dcc.Store(id="sidebar-state", data={"open": False}),
+    dcc.Store(id="sidebar-state",       data={"open": False}),
     sidebar_overlay,
     sidebar,
     header,
@@ -152,18 +176,15 @@ def ensure_default_route():
     prevent_initial_call=True
 )
 def toggle_sidebar(menu_clicks, overlay_clicks, state):
-    """Toggle mobile sidebar when hamburger button or overlay is clicked."""
     is_open = state.get("open", False)
     new_state = not is_open
-    
-    sidebar_class = "analytics-sidebar open" if new_state else "analytics-sidebar"
-    overlay_class = "sidebar-overlay active" if new_state else "sidebar-overlay"
-    
+    sidebar_class  = "analytics-sidebar open" if new_state else "analytics-sidebar"
+    overlay_class  = "sidebar-overlay active" if new_state else "sidebar-overlay"
     return sidebar_class, overlay_class
 
+
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "7860"))
+    host  = os.getenv("HOST",  "0.0.0.0")
+    port  = int(os.getenv("PORT", "10000"))
     debug = os.getenv("DEBUG", "false").lower() == "true"
     app.run(host=host, port=port, debug=debug)
-
