@@ -1,0 +1,15 @@
+dash
+dash-bootstrap-components
+plotly
+pandas
+numpy
+sqlalchemy
+pymysql
+psycopg2-binary
+scikit-learn
+requests
+huggingface-hub
+openpyxl
+kaleido
+reportlab
+gunicorn
