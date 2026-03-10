@@ -13,28 +13,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        run: |
-          git clone "https://github.com/${GITHUB_REPOSITORY}.git" repo
-          cd repo
-          git checkout "${GITHUB_SHA}"
-
-      - name: Validate HF_TOKEN
-        run: |
-          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
-            echo "HF_TOKEN secret is missing"
-            exit 1
-          fi
-          echo "HF_TOKEN found"
-
-      - name: Configure git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git lfs install
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Push to Hugging Face Space
         run: |
-          cd repo
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git remote add space "https://deric254:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/deric254/dericbi-analytics"
           git push --force space HEAD:main
-          echo "Done - live at https://huggingface.co/spaces/deric254/dericbi-analytics"
+          echo "Live at https://huggingface.co/spaces/deric254/dericbi-analytics"
