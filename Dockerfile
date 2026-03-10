@@ -1,8 +1,7 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    HOST=0.0.0.0
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
@@ -11,6 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8000
+EXPOSE 10000
 
-CMD gunicorn app:server --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120
+CMD gunicorn app:server --bind 0.0.0.0:${PORT:-10000} --workers 2 --timeout 120
