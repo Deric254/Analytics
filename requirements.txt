@@ -8,7 +8,6 @@ pymysql
 psycopg2-binary
 scikit-learn
 requests
-huggingface-hub
 openpyxl
 kaleido
 reportlab
