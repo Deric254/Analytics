@@ -208,7 +208,7 @@ def parse_contents(contents, filename):
         style_cell={"fontSize": "12px", "padding": "6px 10px"},
         page_size=10,
     )
-    dataset  = {"filename": filename, "records": df.to_dict("records")}
+    dataset  = {"filename": filename, "records": df.to_dict("records"), "is_sample": False}
     msg      = _success_msg(f"✓ Loaded {filename} — {len(df):,} rows × {len(df.columns)} columns")
     return profile, msg, preview, dataset
 
@@ -332,7 +332,7 @@ def update_output(contents, test_clicks, run_clicks, filename,
                 style_cell={"fontSize": "12px", "padding": "6px 10px"},
                 page_size=10,
             )
-            dataset = {"filename": f"{db_type}_query", "records": df.to_dict("records")}
+            dataset = {"filename": f"{db_type}_query", "records": df.to_dict("records"), "is_sample": False}
             return profile, _success_msg(f"✓ Query returned {len(df):,} rows × {len(df.columns)} columns"), preview, dataset
         except Exception as exc:
             return no_update, _error_msg(f"Database error: {exc}"), no_update, no_update
