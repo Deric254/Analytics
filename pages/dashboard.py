@@ -43,13 +43,16 @@ def _flag(icon, text, bg):
 CFG = {"displaylogo":False,"responsive":True}
 
 layout = html.Div([
+    # Sample data notice — shown automatically, hidden when real data loaded
+    html.Div(id="dash-sample-notice"),
+
     html.Div([
         html.Div([
             html.H2("Dashboard", style={"margin":"0","fontSize":"22px","fontWeight":"700","color":"#1f2937"}),
             html.P(id="dash-subtitle",
                    style={"margin":"4px 0 0","color":"#6b7280","fontSize":"13px"}),
         ]),
-        html.A(html.Button("→ Upload Data", style={
+        html.A(html.Button("→ Upload Your Data", style={
             "background":BRAND,"color":"#fff","border":"none","borderRadius":"6px",
             "padding":"8px 16px","cursor":"pointer","fontWeight":"600","fontSize":"13px",
         }), href="/ingestion"),
@@ -76,6 +79,7 @@ layout = html.Div([
 
 
 @dash.callback(
+    Output("dash-sample-notice","children"),
     Output("dash-subtitle",  "children"),
     Output("dash-kpis",      "children"),
     Output("dash-flags",     "children"),
@@ -101,7 +105,7 @@ def render(shared_dataset):
     ])
 
     if not shared_dataset or not shared_dataset.get("records"):
-        return ("Upload data to auto-generate your dashboard",
+        return (html.Div(), "Upload data to auto-generate your dashboard",
                 [], html.Div(), html.Div(), html.Div(), html.Div(), html.Div(), welcome)
 
     df   = _coerce(pd.DataFrame(shared_dataset["records"]))
@@ -112,6 +116,18 @@ def render(shared_dataset):
     fn   = shared_dataset.get("filename","dataset")
 
     subtitle = f"{fn}  |  {p.rows:,} rows × {p.cols_count} columns  |  Domain: {p.domain}"
+
+    # Sample data banner
+    is_sample = shared_dataset.get("is_sample", False)
+    sample_notice = html.Div([
+        html.Span("📊 Viewing demo data. ", style={"fontWeight":"600"}),
+        html.Span("Upload your own data to analyse your business. "),
+        html.A("→ Go to Ingestion", href="/ingestion",
+               style={"color":"#92400e","fontWeight":"700","textDecoration":"none"}),
+    ], style={
+        "background":"#fef3c7","border":"1px solid #fbbf24","borderRadius":"8px",
+        "padding":"10px 16px","marginBottom":"16px","fontSize":"13px","color":"#78350f",
+    }) if is_sample else html.Div()
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
     missing = int(df.isna().sum().sum())
@@ -281,4 +297,4 @@ def render(shared_dataset):
             ], style={"margin":"0","paddingLeft":"20px"})
         ])
 
-    return subtitle, kpis, health, trend_section, top_section, dist_section, cat_section, insights_section
+    return sample_notice, subtitle, kpis, health, trend_section, top_section, dist_section, cat_section, insights_section
