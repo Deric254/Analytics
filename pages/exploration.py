@@ -1,286 +1,324 @@
+"""
+Exploration — slice, filter, aggregate, compare. Auto-populates from DataProfile.
+Results show immediately on load. Push to Visualization works.
+"""
 import dash
-from dash import html, dcc, dash_table, Input, Output, State
-import pandas as pd
+from dash import html, dcc, dash_table, Input, Output, State, ctx
 import plotly.express as px
-from services.export_utils import format_compact_number
+import pandas as pd
+import numpy as np
+from services.insights_agent import DataProfile, _coerce, _series, _fmt
 
-dash.register_page(__name__, path="/exploration", name="Exploration & Modeling")
+dash.register_page(__name__, path="/exploration", name="Exploration")
+
+BRAND  = "#3e8865"
+CFG    = {"displaylogo": False, "responsive": True}
+
+def _card(title, children):
+    return html.Div([
+        html.Div(title, style={"fontSize":"13px","fontWeight":"700","color":"#374151",
+                               "borderBottom":"2px solid #e5e7eb","paddingBottom":"6px","marginBottom":"12px"}),
+        *children,
+    ], style={"background":"#fff","borderRadius":"10px","padding":"16px 18px",
+               "boxShadow":"0 1px 6px rgba(0,0,0,0.07)","border":"1px solid #e5e7eb","marginBottom":"16px"})
+
+def _kpi_card(title, value, sub=""):
+    return html.Div([
+        html.Div(title,  style={"fontSize":"11px","fontWeight":"600","color":"#6b7280","textTransform":"uppercase"}),
+        html.Div(value,  style={"fontSize":"24px","fontWeight":"700","color":BRAND,"margin":"4px 0"}),
+        html.Div(sub,    style={"fontSize":"11px","color":"#9ca3af"}),
+    ], style={"background":"#fff","borderRadius":"10px","padding":"14px 16px","flex":"1","minWidth":"130px",
+               "boxShadow":"0 1px 6px rgba(0,0,0,0.07)","border":"1px solid #e5e7eb"})
 
 layout = html.Div([
-    html.H2("DericBI Analytics Engine - Exploration & Modeling", className="page-title"),
+    html.H2("Data Exploration", style={"marginBottom":"4px","color":"#1f2937"}),
+    html.P("Slice, filter, aggregate and compare. Configure options and click Explore.",
+           style={"color":"#6b7280","fontSize":"13px","marginBottom":"20px"}),
 
     html.Div([
-        html.Label("Aggregation"),
-        dcc.Dropdown(
-            id="exp-aggregation",
-            options=[
-                {"label": "Sum", "value": "sum"},
-                {"label": "Average", "value": "mean"},
-                {"label": "Minimum", "value": "min"},
-                {"label": "Maximum", "value": "max"},
-                {"label": "Range (max-min)", "value": "range"},
-                {"label": "Count", "value": "count"},
-            ],
-            value="mean",
-            placeholder="Choose aggregation method"
-        ),
-        html.Label("Metric columns"),
-        dcc.Dropdown(id="exp-metrics", multi=True, placeholder="Choose one or more numeric metrics"),
-        html.Label("Group by"),
-        dcc.Dropdown(id="exp-groupby", placeholder="Optional: group results by a column"),
-        html.Label("Top/Bottom ranking"),
-        dcc.RadioItems(
-            id="exp-rank-mode",
-            options=[
-                {"label": "None", "value": "none"},
-                {"label": "Top", "value": "top"},
-                {"label": "Bottom", "value": "bottom"},
-            ],
-            value="none"
-        ),
-        dcc.Slider(id="exp-topn", min=3, max=100, step=1, value=10),
-        html.Label("Number format"),
-        dcc.Dropdown(
-            id="exp-number-format",
-            options=[
-                {"label": "Plain", "value": "plain"},
-                {"label": "K", "value": "k"},
-                {"label": "M", "value": "m"},
-                {"label": "B", "value": "b"},
-                {"label": "Currency", "value": "currency"},
-            ],
-            value="plain",
-            placeholder="Choose number format"
-        ),
-        html.Label("Currency (for currency format)"),
-        dcc.Dropdown(
-            id="exp-currency",
-            options=[
-                {"label": "USD", "value": "USD"},
-                {"label": "EUR", "value": "EUR"},
-                {"label": "GBP", "value": "GBP"},
-                {"label": "KES", "value": "KES"},
-                {"label": "INR", "value": "INR"},
-                {"label": "JPY", "value": "JPY"},
-            ],
-            value="USD",
-            placeholder="Select currency"
-        ),
-        html.Label("Slicer 1 column"),
-        dcc.Dropdown(id="exp-slicer1-column", placeholder="Choose first slicer column"),
-        dcc.Dropdown(id="exp-slicer1-values", multi=True, placeholder="Choose first slicer values"),
-        html.Label("Slicer 2 column"),
-        dcc.Dropdown(id="exp-slicer2-column", placeholder="Choose second slicer column"),
-        dcc.Dropdown(id="exp-slicer2-values", multi=True, placeholder="Choose second slicer values"),
-        html.Label("Preferred chart type for push to Visualization"),
-        dcc.Dropdown(
-            id="exp-chart-type",
-            options=[
-                {"label": "Bar", "value": "bar"},
-                {"label": "Line", "value": "line"},
-                {"label": "Scatter", "value": "scatter"},
-                {"label": "Histogram", "value": "histogram"},
-                {"label": "Box", "value": "box"},
-                {"label": "Pie", "value": "pie"},
-            ],
-            value="bar",
-            placeholder="Select chart type to push"
-        ),
-        html.Button("Apply Exploration", id="exp-apply", n_clicks=0, style={"marginTop": "10px"}),
-        html.Button("Push to Visualization", id="exp-push", n_clicks=0, style={"marginTop": "10px", "marginLeft": "8px"}),
-    ], style={"marginTop": "20px"}),
+        # ── Left panel ────────────────────────────────────────────────────────
+        html.Div([
+            html.Div([
+                html.Label("Metric columns", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-metrics", multi=True, placeholder="Numeric columns to analyse"),
+            ], style={"marginBottom":"14px"}),
 
-    html.Div(id="exploration-message", style={"marginTop": "10px"}),
-    html.Div(id="exploration-kpis", className="kpi-container", style={"marginTop": "20px"}),
-    dcc.Graph(id="exploration-preview-chart"),
-    html.Div(id="exploration-content", style={"marginTop": "20px"})
+            html.Div([
+                html.Label("Group by", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-groupby", placeholder="Group results by..."),
+            ], style={"marginBottom":"14px"}),
+
+            html.Div([
+                html.Label("Aggregation", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-agg", value="sum", clearable=False, options=[
+                    {"label":"Sum",         "value":"sum"},
+                    {"label":"Average",     "value":"mean"},
+                    {"label":"Count",       "value":"count"},
+                    {"label":"Max",         "value":"max"},
+                    {"label":"Min",         "value":"min"},
+                    {"label":"Std Dev",     "value":"std"},
+                    {"label":"Range",       "value":"range"},
+                ]),
+            ], style={"marginBottom":"14px"}),
+
+            html.Div([
+                html.Label("Rank", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.RadioItems(id="exp-rank", value="none", options=[
+                    {"label":"All","value":"none"},
+                    {"label":"Top N","value":"top"},
+                    {"label":"Bottom N","value":"bottom"},
+                ], labelStyle={"marginRight":"12px","fontSize":"13px"},
+                inputStyle={"marginRight":"4px"}),
+                dcc.Slider(id="exp-topn", min=3, max=50, step=1, value=10,
+                           marks={3:"3",10:"10",25:"25",50:"50"},
+                           tooltip={"placement":"bottom"}),
+            ], style={"marginBottom":"14px"}),
+
+            html.Hr(style={"border":"none","borderTop":"1px solid #e5e7eb","margin":"8px 0"}),
+            html.Div("Filters", style={"fontSize":"12px","fontWeight":"700","color":"#6b7280",
+                                       "marginBottom":"10px","textTransform":"uppercase"}),
+
+            html.Div([
+                html.Label("Filter column 1", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-f1-col", placeholder="Column..."),
+                dcc.Dropdown(id="exp-f1-val", multi=True, placeholder="Values...",
+                             style={"marginTop":"4px"}),
+            ], style={"marginBottom":"12px"}),
+
+            html.Div([
+                html.Label("Filter column 2", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-f2-col", placeholder="Column..."),
+                dcc.Dropdown(id="exp-f2-val", multi=True, placeholder="Values...",
+                             style={"marginTop":"4px"}),
+            ], style={"marginBottom":"16px"}),
+
+            html.Div([
+                html.Button("Explore →", id="exp-apply", n_clicks=0, style={
+                    "padding":"9px 20px","background":BRAND,"color":"#fff","border":"none",
+                    "borderRadius":"6px","cursor":"pointer","fontWeight":"700","fontSize":"13px",
+                    "marginRight":"8px",
+                }),
+                html.Button("Push to Visualization", id="exp-push", n_clicks=0, style={
+                    "padding":"9px 14px","background":"#fff","color":BRAND,
+                    "border":f"1px solid {BRAND}","borderRadius":"6px",
+                    "cursor":"pointer","fontWeight":"600","fontSize":"12px",
+                }),
+            ]),
+            dcc.Store(id="shared-visual-config", storage_type="session"),
+        ], style={"width":"250px","flexShrink":"0","background":"#fff","borderRadius":"10px",
+                  "padding":"18px","boxShadow":"0 1px 6px rgba(0,0,0,0.07)",
+                  "border":"1px solid #e5e7eb","alignSelf":"flex-start"}),
+
+        # ── Right panel ───────────────────────────────────────────────────────
+        html.Div([
+            html.Div(id="exp-message", style={"marginBottom":"12px","fontSize":"13px"}),
+            dcc.Loading(
+                html.Div(id="exp-kpis",
+                         style={"display":"flex","gap":"12px","flexWrap":"wrap","marginBottom":"16px"}),
+                type="dot"),
+            dcc.Loading(
+                dcc.Graph(id="exp-chart",
+                          figure={"data":[],"layout":{"title":"Configure options and click Explore"}},
+                          config=CFG),
+                type="circle"),
+            dcc.Loading(html.Div(id="exp-table", style={"marginTop":"14px"}), type="dot"),
+        ], style={"flex":"1","minWidth":"0"}),
+    ], style={"display":"flex","gap":"16px","alignItems":"flex-start"}),
 ])
 
 
-def _safe_aggregate(series: pd.Series, agg: str):
-    clean = pd.to_numeric(series, errors="coerce").dropna()
-    if agg == "sum":
-        return clean.sum()
-    if agg == "mean":
-        return clean.mean()
-    if agg == "min":
-        return clean.min()
-    if agg == "max":
-        return clean.max()
-    if agg == "range":
-        return clean.max() - clean.min() if not clean.empty else float("nan")
-    if agg == "count":
-        return clean.count()
-    return clean.mean()
-
+# ── Populate dropdowns from DataProfile ───────────────────────────────────────
 
 @dash.callback(
     Output("exp-metrics", "options"),
     Output("exp-metrics", "value"),
     Output("exp-groupby", "options"),
     Output("exp-groupby", "value"),
-    Output("exp-slicer1-column", "options"),
-    Output("exp-slicer2-column", "options"),
-    Input("shared-dataset", "data")
+    Output("exp-f1-col",  "options"),
+    Output("exp-f2-col",  "options"),
+    Input("shared-dataset", "data"),
 )
-def update_exploration_options(shared_dataset):
+def populate_dropdowns(shared_dataset):
     if not shared_dataset or not shared_dataset.get("records"):
         return [], [], [], None, [], []
-
-    df = pd.DataFrame(shared_dataset["records"])
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    all_cols = df.columns.tolist()
-
-    metric_options = [{"label": c, "value": c} for c in numeric_cols]
-    group_options = [{"label": c, "value": c} for c in all_cols]
-    default_metrics = numeric_cols[:2] if len(numeric_cols) >= 2 else numeric_cols
-
-    return metric_options, default_metrics, group_options, (all_cols[0] if all_cols else None), group_options, group_options
+    df   = _coerce(pd.DataFrame(shared_dataset["records"]))
+    p    = DataProfile(df)
+    nums = [{"label": c, "value": c} for c in p.numeric_cols]
+    all_cols = [{"label": c, "value": c} for c in df.columns]
+    # Smart defaults from DataProfile
+    default_metrics = [p.value_col] if p.value_col else p.numeric_cols[:2]
+    default_group   = p.group_cols[0] if p.group_cols else None
+    return nums, default_metrics, all_cols, default_group, all_cols, all_cols
 
 
 @dash.callback(
-    Output("exp-slicer1-values", "options"),
-    Output("exp-slicer2-values", "options"),
+    Output("exp-f1-val", "options"),
     Input("shared-dataset", "data"),
-    Input("exp-slicer1-column", "value"),
-    Input("exp-slicer2-column", "value")
+    Input("exp-f1-col",    "value"),
 )
-def update_slicer_values(shared_dataset, slicer1_col, slicer2_col):
-    if not shared_dataset or not shared_dataset.get("records"):
-        return [], []
-
+def f1_values(shared_dataset, col):
+    if not shared_dataset or not col: return []
     df = pd.DataFrame(shared_dataset["records"])
-
-    def options_for(column):
-        if not column or column not in df.columns:
-            return []
-        vals = df[column].dropna().astype(str).unique().tolist()
-        vals = sorted(vals)[:500]
-        return [{"label": v, "value": v} for v in vals]
-
-    return options_for(slicer1_col), options_for(slicer2_col)
+    if col not in df.columns: return []
+    vals = sorted(df[col].dropna().astype(str).unique())[:300]
+    return [{"label": v, "value": v} for v in vals]
 
 
 @dash.callback(
-    Output("exploration-message", "children"),
-    Output("exploration-kpis", "children"),
-    Output("exploration-preview-chart", "figure"),
-    Output("exploration-content", "children"),
-    Input("exp-apply", "n_clicks"),
+    Output("exp-f2-val", "options"),
     Input("shared-dataset", "data"),
-    State("exp-aggregation", "value"),
-    State("exp-metrics", "value"),
-    State("exp-groupby", "value"),
-    State("exp-rank-mode", "value"),
-    State("exp-topn", "value"),
-    State("exp-number-format", "value"),
-    State("exp-currency", "value"),
-    State("exp-slicer1-column", "value"),
-    State("exp-slicer1-values", "value"),
-    State("exp-slicer2-column", "value"),
-    State("exp-slicer2-values", "value"),
+    Input("exp-f2-col",    "value"),
 )
-def render_exploration(n_clicks, shared_dataset, aggregation, metrics, groupby_col, rank_mode, topn,
-                       number_format, currency, slicer1_col, slicer1_values, slicer2_col, slicer2_values):
-    if not shared_dataset or not shared_dataset.get("records"):
-        return "No uploaded data found. Upload from Ingestion first.", [], px.scatter(title="Upload data first"), html.Div("No data")
-
+def f2_values(shared_dataset, col):
+    if not shared_dataset or not col: return []
     df = pd.DataFrame(shared_dataset["records"])
+    if col not in df.columns: return []
+    vals = sorted(df[col].dropna().astype(str).unique())[:300]
+    return [{"label": v, "value": v} for v in vals]
+
+
+# ── Main exploration callback ─────────────────────────────────────────────────
+
+def _agg_series(s: pd.Series, agg: str):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty: return np.nan
+    if agg == "sum":   return s.sum()
+    if agg == "mean":  return s.mean()
+    if agg == "count": return s.count()
+    if agg == "max":   return s.max()
+    if agg == "min":   return s.min()
+    if agg == "std":   return s.std()
+    if agg == "range": return s.max() - s.min()
+    return s.mean()
+
+
+@dash.callback(
+    Output("exp-message", "children"),
+    Output("exp-kpis",    "children"),
+    Output("exp-chart",   "figure"),
+    Output("exp-table",   "children"),
+    Input("exp-apply",    "n_clicks"),
+    State("shared-dataset","data"),
+    State("exp-metrics",  "value"),
+    State("exp-groupby",  "value"),
+    State("exp-agg",      "value"),
+    State("exp-rank",     "value"),
+    State("exp-topn",     "value"),
+    State("exp-f1-col",   "value"),
+    State("exp-f1-val",   "value"),
+    State("exp-f2-col",   "value"),
+    State("exp-f2-val",   "value"),
+    prevent_initial_call=True,
+)
+def run_exploration(_, shared_dataset, metrics, groupby, agg, rank, topn,
+                    f1_col, f1_val, f2_col, f2_val):
+    if not shared_dataset or not shared_dataset.get("records"):
+        return "No data loaded — go to Ingestion first.", [], \
+               {"data":[],"layout":{"title":"No data"}}, html.Div()
+
+    df = _coerce(pd.DataFrame(shared_dataset["records"]))
+    p  = DataProfile(df)
+
+    # Apply filters
+    if f1_col and f1_col in df.columns and f1_val:
+        df = df[df[f1_col].astype(str).isin(f1_val)]
+    if f2_col and f2_col in df.columns and f2_val:
+        df = df[df[f2_col].astype(str).isin(f2_val)]
 
     if df.empty:
-        return "Uploaded dataset is empty.", [], px.scatter(title="Empty dataset"), html.Div("No data")
+        return "No rows after filters.", [], {"data":[],"layout":{"title":"No rows after filter"}}, html.Div()
 
-    filtered_df = df.copy()
-    if slicer1_col and slicer1_col in filtered_df.columns and slicer1_values:
-        filtered_df = filtered_df[filtered_df[slicer1_col].astype(str).isin([str(v) for v in slicer1_values])]
-    if slicer2_col and slicer2_col in filtered_df.columns and slicer2_values:
-        filtered_df = filtered_df[filtered_df[slicer2_col].astype(str).isin([str(v) for v in slicer2_values])]
+    # Default metrics from DataProfile if none selected
+    metrics = metrics or ([p.value_col] if p.value_col else p.numeric_cols[:2])
+    metrics = [c for c in (metrics or []) if c in df.columns]
 
-    if filtered_df.empty:
-        return "Slicers returned no rows.", [], px.scatter(title="No rows after filtering"), html.Div("No rows after filters")
+    # ── KPI strip ─────────────────────────────────────────────────────────────
+    kpi_cards = [_kpi_card("Rows", f"{len(df):,}", "after filters")]
+    for m in metrics[:4]:
+        val = _agg_series(df[m], agg)
+        kpi_cards.append(_kpi_card(f"{agg.title()} {m}", _fmt(val)))
 
-    metrics = metrics or filtered_df.select_dtypes(include="number").columns.tolist()[:2]
-    valid_metrics = [col for col in metrics if col in filtered_df.columns]
-    if not valid_metrics and aggregation != "count":
-        return "Pick at least one numeric metric.", [], px.scatter(title="Select numeric metrics"), html.Div("No numeric metric selected")
+    # ── Grouped result ────────────────────────────────────────────────────────
+    if groupby and groupby in df.columns and metrics:
+        def agg_fn(x): return _agg_series(x, agg)
+        result = df.groupby(groupby, dropna=False)[metrics].agg(agg_fn).reset_index()
+        sort_col = metrics[0]
 
-    kpis = []
-    for metric in valid_metrics:
-        value = _safe_aggregate(filtered_df[metric], aggregation)
-        kpis.append(
-            html.Div([
-                html.H3(f"{aggregation.upper()} {metric}"),
-                html.P(format_compact_number(value, number_format=number_format, currency=currency), className="kpi-value"),
-            ], className="kpi-card")
-        )
-
-    if aggregation == "count" and not valid_metrics:
-        total = len(filtered_df)
-        kpis.append(
-            html.Div([
-                html.H3("COUNT"),
-                html.P(f"{total:,}", className="kpi-value"),
-            ], className="kpi-card")
-        )
-
-    if groupby_col and groupby_col in filtered_df.columns:
-        grouped = filtered_df.groupby(groupby_col, dropna=False)
-        if aggregation == "count":
-            result = grouped.size().reset_index(name="count")
-            sort_col = "count"
+        if rank == "top":
+            result = result.sort_values(sort_col, ascending=False).head(topn)
+        elif rank == "bottom":
+            result = result.sort_values(sort_col, ascending=True).head(topn)
         else:
-            result = grouped[valid_metrics].agg(
-                (lambda x: _safe_aggregate(x, aggregation))
-            ).reset_index()
-            sort_col = valid_metrics[0]
+            result = result.sort_values(sort_col, ascending=False)
 
-        if rank_mode == "top":
-            result = result.sort_values(by=sort_col, ascending=False).head(topn)
-        elif rank_mode == "bottom":
-            result = result.sort_values(by=sort_col, ascending=True).head(topn)
+        # Chart
+        if len(metrics) == 1:
+            fig = px.bar(result.head(30), x=groupby, y=sort_col,
+                         title=f"{agg.title()} of {sort_col} by {groupby}",
+                         color=sort_col,
+                         color_continuous_scale=["#d1fae5", BRAND],
+                         text_auto=True)
+            fig.update_layout(coloraxis_showscale=False)
+        else:
+            fig = px.bar(result.head(30), x=groupby, y=metrics, barmode="group",
+                         title=f"{agg.title()} by {groupby}",
+                         color_discrete_sequence=px.colors.qualitative.Safe)
 
-        preview_y = sort_col
-        preview_fig = px.bar(result, x=groupby_col, y=preview_y, title=f"{aggregation.upper()} by {groupby_col}")
+        fig.update_layout(template="plotly_white",
+                          margin=dict(t=50,l=40,r=20,b=60), height=360)
         table_df = result
-    else:
+
+    elif metrics:
+        # No groupby — summary stats
         rows = []
-        for metric in valid_metrics:
-            rows.append({"metric": metric, "aggregation": aggregation, "value": _safe_aggregate(filtered_df[metric], aggregation)})
-        if aggregation == "count" and not rows:
-            rows.append({"metric": "rows", "aggregation": "count", "value": len(filtered_df)})
-
+        for m in metrics:
+            s = pd.to_numeric(df[m], errors="coerce").dropna()
+            rows.append({
+                "Column": m,
+                "Count":  f"{len(s):,}",
+                "Sum":    _fmt(s.sum()),
+                "Mean":   _fmt(s.mean()),
+                "Median": _fmt(s.median()),
+                "Std":    _fmt(s.std()),
+                "Min":    _fmt(s.min()),
+                "Max":    _fmt(s.max()),
+            })
         table_df = pd.DataFrame(rows)
-        if not valid_metrics:
-            preview_fig = px.histogram(filtered_df, x=filtered_df.columns[0], title="Distribution preview")
-        else:
-            preview_fig = px.histogram(filtered_df, x=valid_metrics[0], title=f"Distribution: {valid_metrics[0]}")
+        fig = px.box(df[metrics], title="Distribution of selected metrics",
+                     color_discrete_sequence=px.colors.qualitative.Safe)
+        fig.update_layout(template="plotly_white",
+                          margin=dict(t=50,l=40,r=20,b=40), height=340)
+    else:
+        return "Select at least one metric.", kpi_cards, \
+               {"data":[],"layout":{"title":"Select metrics"}}, html.Div()
 
+    # Table
     table = dash_table.DataTable(
-        data=table_df.to_dict("records"),
-        columns=[{"name": i, "id": i} for i in table_df.columns],
-        page_size=15,
-        style_table={"overflowX": "auto"}
+        data=table_df.head(100).to_dict("records"),
+        columns=[{"name": c, "id": c} for c in table_df.columns],
+        style_table={"overflowX":"auto"},
+        style_header={"background":"#f3f4f6","fontWeight":"700","fontSize":"12px","border":"none"},
+        style_cell={"fontSize":"12px","padding":"7px 10px"},
+        style_data_conditional=[{"if":{"row_index":"odd"},"backgroundColor":"#fafafa"}],
+        page_size=20,
+        export_format="csv",
     )
 
-    message = f"Exploration ready. Rows after slicers: {len(filtered_df):,}. Columns: {len(filtered_df.columns)}"
+    msg = (f"✓  {len(df):,} rows  |  {agg} of {', '.join(metrics)}"
+           + (f"  grouped by {groupby}" if groupby else ""))
 
-    return message, kpis, preview_fig, table
+    return (html.Span(msg, style={"color":"#15803d","fontWeight":"600"}),
+            kpi_cards, fig, table)
 
 
 @dash.callback(
     Output("shared-visual-config", "data"),
-    Input("exp-push", "n_clicks"),
-    State("exp-chart-type", "value"),
-    State("exp-groupby", "value"),
-    State("exp-metrics", "value"),
-    State("exp-aggregation", "value"),
-    prevent_initial_call=True
+    Input("exp-push",  "n_clicks"),
+    State("exp-groupby","value"),
+    State("exp-metrics","value"),
+    State("exp-agg",    "value"),
+    prevent_initial_call=True,
 )
-def push_to_visualization(n_clicks, chart_type, groupby_col, metrics, aggregation):
+def push_to_viz(_, groupby, metrics, agg):
     metrics = metrics or []
-    return {
-        "chart_type": chart_type,
-        "x": groupby_col,
-        "y": metrics[0] if metrics else None,
-        "aggregation": aggregation,
-    }
+    return {"x": groupby, "y": metrics[0] if metrics else None, "aggregation": agg, "chart_type": "bar"}

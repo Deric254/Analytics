@@ -1,226 +1,299 @@
+"""
+Export utilities — fully dynamic, uses DataProfile column detection.
+No hardcoded column names.
+"""
 import io
 import zipfile
 from datetime import datetime
 
 import pandas as pd
-import plotly.graph_objects as go
+import numpy as np
 import plotly.io as pio
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
-    Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
+    Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
 )
 
 
-def format_compact_number(
-    value: float, number_format: str = "plain", currency: str = "USD"
-) -> str:
-    if pd.isna(value):
-        return "N/A"
-    prefix = ""
-    if number_format == "currency":
-        symbols = {
-            "USD": "$", "EUR": "€", "GBP": "£",
-            "KES": "KSh ", "INR": "₹", "JPY": "¥",
-        }
-        prefix = symbols.get(currency, f"{currency} ")
-    if number_format == "k":
-        return f"{prefix}{value / 1_000:,.2f}K"
-    if number_format == "m":
-        return f"{prefix}{value / 1_000_000:,.2f}M"
-    if number_format == "b":
-        return f"{prefix}{value / 1_000_000_000:,.2f}B"
-    if number_format == "currency":
-        return f"{prefix}{value:,.2f}"
-    return f"{value:,.2f}"
+def _fmt(v) -> str:
+    try:
+        f = float(v)
+        if np.isnan(f): return "N/A"
+        if abs(f) >= 1_000_000: return f"{f/1_000_000:,.2f}M"
+        if abs(f) >= 1_000:     return f"{f:,.0f}"
+        return f"{f:.2f}"
+    except (TypeError, ValueError):
+        return str(v)
 
 
-def build_exhaustive_report_data(
-    df: pd.DataFrame, source_name: str = "dataset"
-) -> dict:
-    report_df = df.copy()
-    for col in report_df.select_dtypes(include="object").columns:
-        parsed = pd.to_numeric(report_df[col], errors="coerce")
-        if parsed.notna().mean() >= 0.8:
-            report_df[col] = parsed
+def build_report_data(df: pd.DataFrame, source_name: str = "dataset") -> dict:
+    """Build report data from any DataFrame — no hardcoded column assumptions."""
+    from services.insights_agent import DataProfile, _coerce
+    df   = _coerce(df)
+    p    = DataProfile(df)
+    rows, cols = df.shape
+    missing    = int(df.isna().sum().sum())
+    dups       = int(df.duplicated().sum())
 
-    rows = len(report_df)
-    cols = len(report_df.columns)
-    missing_cells = int(report_df.isna().sum().sum())
-    missing_pct = (missing_cells / max(rows * max(cols, 1), 1)) * 100
-    numeric_cols = report_df.select_dtypes(include="number").columns.tolist()
-    categorical_cols = report_df.select_dtypes(exclude="number").columns.tolist()
-
-    overview = {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "source": source_name,
-        "rows": rows,
-        "columns": cols,
-        "numeric_columns": len(numeric_cols),
-        "categorical_columns": len(categorical_cols),
-        "missing_values": missing_cells,
-        "missing_percent": round(missing_pct, 3),
-        "column_names": report_df.columns.tolist(),
-    }
-
-    numeric_summary = pd.DataFrame()
-    if numeric_cols:
-        numeric_summary = (
-            report_df[numeric_cols]
-            .describe()
-            .transpose()
-            .reset_index()
-            .rename(columns={"index": "column"})
-        )
-        numeric_summary["range"] = numeric_summary["max"] - numeric_summary["min"]
-
-    categorical_summary_rows = []
-    for col in categorical_cols:
-        series = report_df[col].dropna().astype(str)
-        if series.empty:
-            top_value, top_freq, unique_count = "N/A", 0, 0
-        else:
-            vc = series.value_counts()
-            top_value = vc.index[0]
-            top_freq = int(vc.iloc[0])
-            unique_count = int(series.nunique())
-        categorical_summary_rows.append({
-            "column": col,
-            "unique_values": unique_count,
-            "top_value": top_value,
-            "top_frequency": top_freq,
-            "missing": int(report_df[col].isna().sum()),
+    # Numeric summary — all numeric cols, skip ID-like
+    num_rows = []
+    for col in p.numeric_cols[:12]:
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        if s.empty: continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+        iqr    = q3 - q1
+        out    = int(((s < q1-1.5*iqr)|(s > q3+1.5*iqr)).sum()) if iqr > 0 else 0
+        num_rows.append({
+            "Column":   col,
+            "Count":    f"{len(s):,}",
+            "Sum":      _fmt(s.sum()),
+            "Mean":     _fmt(s.mean()),
+            "Median":   _fmt(s.median()),
+            "Std Dev":  _fmt(s.std()),
+            "Min":      _fmt(s.min()),
+            "Max":      _fmt(s.max()),
+            "Outliers": str(out) if out else "—",
         })
-    categorical_summary = pd.DataFrame(categorical_summary_rows)
-    sample_rows = report_df.head(20)
+
+    # Categorical summary
+    cat_rows = []
+    for col in p.cat_cols[:10]:
+        s  = df[col].dropna().astype(str)
+        vc = s.value_counts()
+        cat_rows.append({
+            "Column":       col,
+            "Unique":       f"{s.nunique():,}",
+            "Top value":    vc.index[0] if not vc.empty else "—",
+            "Top count":    f"{int(vc.iloc[0]):,}" if not vc.empty else "—",
+            "Top %":        f"{100*vc.iloc[0]/len(s):.1f}%" if not vc.empty else "—",
+            "Missing":      f"{int(df[col].isna().sum()):,}",
+        })
+
+    # Executive findings — auto-generated from the data
+    findings = _auto_findings(df, p, source_name)
 
     return {
-        "overview": overview,
-        "numeric_summary": numeric_summary,
-        "categorical_summary": categorical_summary,
-        "sample_rows": sample_rows,
+        "overview": {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source":       source_name,
+            "domain":       p.domain,
+            "rows":         rows,
+            "columns":      cols,
+            "numeric_cols": len(p.numeric_cols),
+            "cat_cols":     len(p.cat_cols),
+            "date_cols":    len(p.date_cols),
+            "missing":      missing,
+            "missing_pct":  round(100*missing/(rows*cols) if rows*cols else 0, 2),
+            "duplicates":   dups,
+            "value_col":    p.value_col or "—",
+            "group_cols":   ", ".join(p.group_cols) if p.group_cols else "—",
+        },
+        "findings":          findings,
+        "numeric_summary":   pd.DataFrame(num_rows),
+        "categorical_summary": pd.DataFrame(cat_rows),
+        "sample_rows":       df.head(20),
     }
 
 
-def report_data_to_html(report_data: dict) -> str:
-    overview = report_data["overview"]
-    chunks = [
-        "<html><head><meta charset='utf-8'><title>DericBI Report</title></head><body>",
-        "<h1>Dynamic Dataset Report</h1>",
-        f"<p><b>Generated:</b> {overview['generated_at']}</p>",
-        f"<p><b>Source:</b> {overview['source']}</p>",
-        "<h2>Overview</h2><ul>",
-        f"<li>Rows: {overview['rows']:,}</li>",
-        f"<li>Columns: {overview['columns']}</li>",
-        f"<li>Numeric columns: {overview['numeric_columns']}</li>",
-        f"<li>Categorical columns: {overview['categorical_columns']}</li>",
-        f"<li>Missing values: {overview['missing_values']:,} "
-        f"({overview['missing_percent']:.2f}%)</li>",
-        "</ul>",
-    ]
-    ns = report_data["numeric_summary"]
-    if not ns.empty:
-        chunks += ["<h2>Numeric Summary</h2>", ns.to_html(index=False, border=1)]
-    cs = report_data["categorical_summary"]
-    if not cs.empty:
-        chunks += ["<h2>Categorical Summary</h2>", cs.to_html(index=False, border=1)]
-    sr = report_data["sample_rows"]
-    if not sr.empty:
-        chunks += ["<h2>Sample Rows (Top 20)</h2>", sr.to_html(index=False, border=1)]
-    chunks.append("</body></html>")
-    return "\n".join(chunks)
+def _auto_findings(df, p, source_name) -> list[str]:
+    """Generate 4-6 plain-English findings from any dataset."""
+    from services.insights_agent import _series, _fmt, _pct, _chg
+    findings = []
+    num = p.value_col
+    cat = p.group_cols[0] if p.group_cols else None
+    rows, cols = df.shape
+    missing = int(df.isna().sum().sum())
+    dups    = int(df.duplicated().sum())
+
+    # 1. Size & quality
+    complete = 100*(rows*cols-missing)/(rows*cols) if rows*cols else 100
+    qual = "complete" if not missing else f"{complete:.1f}% complete ({missing:,} gaps)"
+    findings.append(
+        f"The dataset contains {rows:,} records across {cols} columns "
+        f"({p.numeric_cols.__len__()} numeric, {p.cat_cols.__len__()} categorical). "
+        f"Data quality: {qual}."
+        + (f" {dups:,} duplicate rows detected." if dups else "")
+    )
+
+    # 2. Key metric summary
+    if num:
+        s = _series(df, num)
+        cv = s.std()/s.mean() if s.mean() else 0
+        spread = ("highly variable" if cv > 0.5 else
+                  "moderately variable" if cv > 0.2 else "consistent")
+        findings.append(
+            f"The primary metric '{num}' totals {_fmt(s.sum())} with an average of {_fmt(s.mean())} "
+            f"and median of {_fmt(s.median())}. "
+            f"Values are {spread} (CV={cv:.2f}), ranging from {_fmt(s.min())} to {_fmt(s.max())}."
+        )
+
+    # 3. Top performer
+    if num and cat:
+        agg   = df.groupby(cat,dropna=False)[num].sum().sort_values(ascending=False).dropna()
+        grand = agg.sum()
+        if grand > 0 and len(agg) >= 2:
+            top1 = agg.iloc[0]
+            share = 100*top1/grand
+            findings.append(
+                f"Top performer: '{agg.index[0]}' in '{cat}' accounts for "
+                f"{_fmt(top1)} ({share:.1f}% of total {num})."
+                + (" This represents significant concentration." if share >= 40 else "")
+            )
+
+    # 4. Trend
+    if num and p.date_cols:
+        dc  = p.date_cols[0]
+        tmp = df.copy()
+        tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
+        tmp[num] = pd.to_numeric(tmp[num], errors="coerce")
+        tmp = tmp.dropna(subset=[dc,num]).sort_values(dc)
+        if len(tmp) >= 6:
+            n     = max(len(tmp)//4, 1)
+            first = tmp[num].iloc[:n].mean()
+            last  = tmp[num].iloc[-n:].mean()
+            if pd.notna(first) and pd.notna(last) and first != 0:
+                chg  = (last-first)/abs(first)*100
+                word = "increased" if chg > 0 else "decreased"
+                findings.append(
+                    f"Trend: '{num}' has {word} by {abs(chg):.1f}% "
+                    f"from the earliest to the most recent records."
+                )
+
+    # 5. Correlations
+    good_nums = [c for c in p.numeric_cols[:8]
+                 if not (_series(df,c).is_monotonic_increasing and _series(df,c).nunique()==rows)]
+    if len(good_nums) >= 2:
+        corr = df[good_nums].corr(numeric_only=True)
+        best_r, best_pair = 0, None
+        for i in range(len(good_nums)):
+            for j in range(i+1,len(good_nums)):
+                v = abs(corr.iloc[i,j])
+                if not np.isnan(v) and v > best_r:
+                    best_r = v
+                    best_pair = (good_nums[i],good_nums[j],corr.iloc[i,j])
+        if best_pair and best_r >= 0.5:
+            a,b,r = best_pair
+            direction = "positively" if r > 0 else "negatively"
+            findings.append(
+                f"Notable correlation: '{a}' and '{b}' are {direction} correlated (r={r:.2f}), "
+                "suggesting these variables tend to move together."
+            )
+
+    return findings
 
 
-def report_data_to_pdf_bytes(report_data: dict) -> bytes:
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
-    overview = report_data["overview"]
-    story.append(Paragraph("Dynamic Dataset Report", styles["Title"]))
-    story.append(Spacer(1, 0.2 * inch))
-    for line in [
-        f"Generated: {overview['generated_at']}",
-        f"Source: {overview['source']}",
-        f"Rows: {overview['rows']:,}",
-        f"Columns: {overview['columns']}",
-        f"Numeric columns: {overview['numeric_columns']}",
-        f"Categorical columns: {overview['categorical_columns']}",
-        f"Missing values: {overview['missing_values']:,} "
-        f"({overview['missing_percent']:.2f}%)",
-    ]:
-        story.append(Paragraph(line, styles["BodyText"]))
-    story.append(Spacer(1, 0.2 * inch))
-
-    def add_table(title, frame, max_rows=25):
-        if frame.empty:
-            return
-        story.append(Paragraph(title, styles["Heading2"]))
-        limited = frame.head(max_rows).copy()
-        for c in limited.columns:
-            limited[c] = limited[c].astype(str)
-        data = [limited.columns.tolist()] + limited.values.tolist()
-        tbl = Table(data, repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ]))
-        story.append(tbl)
-        story.append(Spacer(1, 0.15 * inch))
-
-    add_table("Numeric Summary",     report_data["numeric_summary"],     30)
-    add_table("Categorical Summary", report_data["categorical_summary"], 40)
-    add_table("Sample Rows",         report_data["sample_rows"],         20)
-    doc.build(story)
-    return buffer.getvalue()
-
-
-def visuals_to_html(figures: list, title: str = "Visualizations") -> str:
+def report_to_html(report_data: dict) -> str:
+    ov = report_data["overview"]
     parts = [
-        "<html><head><meta charset='utf-8'>"
-        "<title>Visualization Export</title></head><body>",
-        f"<h1>{title}</h1>",
+        "<html><head><meta charset='utf-8'>",
+        "<style>body{font-family:Segoe UI,sans-serif;margin:40px;color:#1f2937}"
+        "h1{color:#3e8865}h2{color:#374151;border-bottom:2px solid #e5e7eb;padding-bottom:6px}"
+        "table{border-collapse:collapse;width:100%}th{background:#f3f4f6;font-weight:700}"
+        "td,th{border:1px solid #e5e7eb;padding:7px 10px;font-size:13px}"
+        "tr:nth-child(even){background:#f9fafb}.finding{background:#f0fdf4;"
+        "border-left:4px solid #3e8865;padding:12px 16px;margin:8px 0;border-radius:4px}</style>",
+        "<title>DericBI Report</title></head><body>",
+        f"<h1>Dataset Report — {ov['source']}</h1>",
+        f"<p><b>Generated:</b> {ov['generated_at']}  |  "
+        f"<b>Domain:</b> {ov['domain']}  |  "
+        f"<b>Rows:</b> {ov['rows']:,}  |  <b>Columns:</b> {ov['columns']}</p>",
+        f"<p><b>Completeness:</b> {100-ov['missing_pct']:.1f}%  |  "
+        f"<b>Missing values:</b> {ov['missing']:,}  |  "
+        f"<b>Duplicates:</b> {ov['duplicates']:,}</p>",
+        f"<p><b>Key metric:</b> {ov['value_col']}  |  "
+        f"<b>Main groups:</b> {ov['group_cols']}</p>",
+        "<h2>Executive Findings</h2>",
     ]
-    for idx, fig in enumerate(figures, 1):
-        parts.append(f"<h2>Figure {idx}</h2>")
-        parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+    for f in report_data.get("findings", []):
+        parts.append(f"<div class='finding'>{f}</div>")
+
+    ns = report_data.get("numeric_summary", pd.DataFrame())
+    if not ns.empty:
+        parts.append("<h2>Numeric Column Statistics</h2>")
+        parts.append(ns.to_html(index=False, border=0))
+
+    cs = report_data.get("categorical_summary", pd.DataFrame())
+    if not cs.empty:
+        parts.append("<h2>Categorical Column Statistics</h2>")
+        parts.append(cs.to_html(index=False, border=0))
+
+    sr = report_data.get("sample_rows", pd.DataFrame())
+    if not sr.empty:
+        parts.append("<h2>Sample Records (first 20 rows)</h2>")
+        parts.append(sr.to_html(index=False, border=0))
+
     parts.append("</body></html>")
     return "\n".join(parts)
 
 
-def visuals_to_pdf_bytes(figures: list, title: str = "Visualizations") -> bytes:
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
+def report_to_pdf(report_data: dict) -> bytes:
+    buf    = io.BytesIO()
+    doc    = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
-    story = [Paragraph(title, styles["Title"]), Spacer(1, 0.2 * inch)]
-    for idx, fig in enumerate(figures, 1):
-        story.append(Paragraph(f"Figure {idx}", styles["Heading2"]))
-        img_bytes = pio.to_image(fig, format="png", width=1400, height=800, scale=1)
-        img = Image(io.BytesIO(img_bytes), width=9.5 * inch, height=5.2 * inch)
-        story.append(img)
-        if idx < len(figures):
-            story.append(PageBreak())
+    story  = []
+    ov     = report_data["overview"]
+
+    story.append(Paragraph(f"Dataset Report — {ov['source']}", styles["Title"]))
+    story.append(Spacer(1, 0.2*inch))
+    for line in [
+        f"Generated: {ov['generated_at']}",
+        f"Domain: {ov['domain']}   |   Rows: {ov['rows']:,}   |   Columns: {ov['columns']}",
+        f"Completeness: {100-ov['missing_pct']:.1f}%   |   Missing: {ov['missing']:,}   |   Duplicates: {ov['duplicates']:,}",
+        f"Key metric: {ov['value_col']}   |   Main groups: {ov['group_cols']}",
+    ]:
+        story.append(Paragraph(line, styles["BodyText"]))
+
+    story.append(Spacer(1, 0.2*inch))
+    story.append(Paragraph("Executive Findings", styles["Heading2"]))
+    for f in report_data.get("findings", []):
+        story.append(Paragraph(f"• {f}", styles["BodyText"]))
+        story.append(Spacer(1, 0.08*inch))
+
+    def add_df_table(title, frame, max_rows=30):
+        if frame is None or frame.empty: return
+        story.append(Spacer(1, 0.15*inch))
+        story.append(Paragraph(title, styles["Heading2"]))
+        limited = frame.head(max_rows).fillna("—").astype(str)
+        data    = [limited.columns.tolist()] + limited.values.tolist()
+        tbl     = Table(data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(-1,0), colors.lightgrey),
+            ("GRID",       (0,0),(-1,-1), 0.4, colors.grey),
+            ("FONTNAME",   (0,0),(-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0,0),(-1,-1), 7.5),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#f9fafb")]),
+        ]))
+        story.append(tbl)
+
+    add_df_table("Numeric Column Statistics",     report_data.get("numeric_summary"))
+    add_df_table("Categorical Column Statistics", report_data.get("categorical_summary"))
+    add_df_table("Sample Records",               report_data.get("sample_rows"))
+
     doc.build(story)
-    return buffer.getvalue()
+    return buf.getvalue()
 
 
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="cleaned_data")
-    return output.getvalue()
+def df_to_excel(df: pd.DataFrame) -> bytes:
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="data")
+    return out.getvalue()
 
 
-def figures_to_zip_bytes(figures: list) -> bytes:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for idx, fig in enumerate(figures, 1):
-            zf.writestr(
-                f"figure_{idx}.html",
-                fig.to_html(full_html=True, include_plotlyjs="cdn"),
-            )
-    return output.getvalue()
+def figures_to_zip(figures: list) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, fig in enumerate(figures, 1):
+            zf.writestr(f"figure_{i}.html",
+                        fig.to_html(full_html=True, include_plotlyjs="cdn"))
+    return out.getvalue()
+
+
+# Legacy alias used by reporting.py
+build_exhaustive_report_data = build_report_data
+report_data_to_html          = report_to_html
+report_data_to_pdf_bytes     = report_to_pdf
+dataframe_to_excel_bytes     = df_to_excel

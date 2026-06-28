@@ -1,20 +1,199 @@
 """
-DericBI Business Intelligence Engine
-=====================================
-Generates actionable business insights — not statistics.
-Every output answers: "So what? What should the business DO?"
+DericBI Universal Intelligence Engine
+=======================================
+Works on ANY dataset — sales, medical, academic, weather, inventory,
+sports, logistics, or anything else.
 
-Zero API keys. Zero external dependencies beyond pandas/numpy.
+Zero hardcoded column names. Zero hardcoded domain language.
+Auto-discovers structure, picks the right columns, adapts terminology.
 """
 
 from __future__ import annotations
 import re, math
 import pandas as pd
 import numpy as np
-from typing import Optional
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DATASET PROFILER — understands what kind of data this is
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DataProfile:
+    """Auto-discovers the structure and domain of any DataFrame."""
+
+    def __init__(self, df: pd.DataFrame, query: str = ""):
+        self.df    = df
+        self.query = query.lower()
+        self.rows, self.cols_count = df.shape
+
+        # Column classifications
+        self.numeric_cols     = df.select_dtypes(include="number").columns.tolist()
+        self.all_cols         = df.columns.tolist()
+        self.date_cols        = self._find_dates()
+        self.cat_cols         = self._find_cats()
+
+        # Semantic roles — what each column likely represents
+        self.value_col   = self._pick_value_col()    # primary numeric KPI
+        self.cost_col    = self._pick_col_by_role("cost")
+        self.qty_col     = self._pick_col_by_role("qty")
+        self.price_col   = self._pick_col_by_role("price")
+        self.group_cols  = self._pick_group_cols()   # best categorical groupers
+        self.date_col    = self.date_cols[0] if self.date_cols else None
+
+        # Domain detection
+        self.domain = self._detect_domain()
+
+    # ── Column finders ────────────────────────────────────────────────────────
+
+    def _find_dates(self):
+        found = []
+        for col in self.all_cols:
+            if pd.api.types.is_datetime64_any_dtype(self.df[col]):
+                found.append(col)
+            elif self.df[col].dtype == object:
+                p = pd.to_datetime(self.df[col], errors="coerce")
+                if p.notna().mean() >= 0.6:
+                    found.append(col)
+        return found
+
+    def _find_cats(self):
+        date_cols = self._find_dates()
+        cats = []
+        for col in self.all_cols:
+            if col in self.numeric_cols or col in date_cols:
+                continue
+            n_unique = self.df[col].nunique()
+            n_rows   = len(self.df)
+            # Skip if too many unique values relative to rows (likely an ID/text field)
+            if n_unique >= 1 and n_unique / n_rows < 0.5 and n_unique <= 100:
+                cats.append(col)
+        return cats
+
+    def _pick_col_by_role(self, role: str) -> str | None:
+        """Match a column to a semantic role using keyword families."""
+        KW = {
+            "value":  ["revenue","sales","income","amount","value","total","receipts",
+                       "gross","score","marks","rating","price","bill","fee","charge",
+                       "spend","count","qty","quantity","stock","units","volume","output",
+                       "production","yield","weight","length","height","temperature",
+                       "distance","duration","salary","wage","cost","expense"],
+            "cost":   ["cost","expense","cogs","overhead","expenditure","spend",
+                       "payment","outgoing","wages","salary","outflow"],
+            "qty":    ["qty","quantity","units","volume","count","pieces","items",
+                       "sold","orders","number","total_count","days","hours"],
+            "price":  ["price","rate","fee","charge","tariff","unit_price",
+                       "selling_price","fare","rate_per"],
+        }
+        keywords = KW.get(role, [])
+        # 1. Mentioned in user query
+        for col in self.numeric_cols:
+            if col.lower() in self.query:
+                return col
+        # 2. Keyword match
+        for kw in keywords:
+            for col in self.numeric_cols:
+                if kw in col.lower():
+                    return col
+        return None
+
+    def _pick_value_col(self) -> str | None:
+        """Pick the single most important numeric column for this dataset."""
+        if not self.numeric_cols:
+            return None
+        # Mentioned in query
+        for col in self.numeric_cols:
+            if col.lower() in self.query:
+                return col
+        # Skip pure ID columns (monotonically increasing integers)
+        candidates = []
+        for col in self.numeric_cols:
+            s = pd.to_numeric(self.df[col], errors="coerce").dropna()
+            if len(s) < 2:
+                continue
+            # Skip if it looks like an auto-increment ID
+            if s.is_monotonic_increasing and s.nunique() == len(s):
+                continue
+            candidates.append(col)
+
+        if not candidates:
+            return self.numeric_cols[0]
+
+        # Pick highest variance (most interesting spread)
+        return max(candidates, key=lambda c: pd.to_numeric(self.df[c], errors="coerce").std() or 0)
+
+    def _pick_group_cols(self, max_n: int = 3) -> list[str]:
+        """Best categorical columns for grouping — skip IDs, pick meaningful ones."""
+        q = self.query
+        mentioned = [c for c in self.cat_cols if c.lower() in q]
+        rest = [c for c in self.cat_cols if c not in mentioned]
+        # Sort by cardinality: prefer 2–20 unique values (most meaningful segments)
+        def score(c):
+            n = self.df[c].nunique()
+            return abs(n - 8)   # closer to 8 unique values = better grouper
+        rest.sort(key=score)
+        return (mentioned + rest)[:max_n]
+
+    # ── Domain detection ──────────────────────────────────────────────────────
+
+    def _detect_domain(self) -> str:
+        col_text = " ".join(self.all_cols).lower()
+        checks = [
+            ("medical",    r"patient|ward|diagnosis|symptom|admission|discharge|doctor|nurse|hospital|medicine|dose|blood|icu"),
+            ("academic",   r"student|grade|score|marks|subject|class|teacher|exam|course|gpa|attendance|school"),
+            ("weather",    r"temperature|rainfall|humidity|wind|pressure|forecast|climate|precipitation|season"),
+            ("inventory",  r"stock|reorder|warehouse|sku|item|shelf|batch|expiry|supplier|bin|qty|quantity"),
+            ("logistics",  r"shipment|delivery|route|vehicle|driver|cargo|tracking|dispatch|freight|trip"),
+            ("hr",         r"employee|staff|department|salary|leave|hire|payroll|headcount|performance"),
+            ("financial",  r"revenue|sales|profit|cost|expense|margin|budget|forecast|invoice|payment"),
+            ("sports",     r"match|team|player|goal|score|win|loss|league|tournament|season|points"),
+        ]
+        for domain, pattern in checks:
+            if re.search(pattern, col_text):
+                return domain
+        return "general"
+
+    # ── Terminology adapter ───────────────────────────────────────────────────
+
+    def term(self, role: str) -> str:
+        """Return domain-appropriate terminology for a role."""
+        MAP = {
+            "value": {
+                "medical":   "amount",
+                "academic":  "score",
+                "weather":   "measurement",
+                "inventory": "quantity",
+                "hr":        "value",
+                "financial": "revenue",
+                "sports":    "score",
+                "general":   "value",
+            },
+            "top_group": {
+                "medical":   "ward/diagnosis",
+                "academic":  "subject/class",
+                "weather":   "region",
+                "inventory": "item/warehouse",
+                "hr":        "department",
+                "financial": "segment",
+                "sports":    "team",
+                "general":   "group",
+            },
+            "trend": {
+                "medical":   "case volume",
+                "academic":  "performance",
+                "weather":   "conditions",
+                "inventory": "stock movement",
+                "hr":        "headcount / activity",
+                "financial": "revenue",
+                "sports":    "performance",
+                "general":   "trend",
+            },
+        }
+        return MAP.get(role, {}).get(self.domain, role)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FORMATTING
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _coerce(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -25,724 +204,572 @@ def _coerce(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _detect_dates(df: pd.DataFrame) -> list[str]:
-    found = []
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            found.append(col)
-        elif df[col].dtype == object:
-            p = pd.to_datetime(df[col], errors="coerce")
-            if p.notna().mean() >= 0.6:
-                found.append(col)
-    return found
-
-
-def _best_cat(df: pd.DataFrame, query: str = "") -> Optional[str]:
-    """Pick the most business-relevant categorical column."""
-    cats = df.select_dtypes(exclude="number").columns.tolist()
-    if not cats:
-        return None
-    # prefer one mentioned in query
-    q = query.lower()
-    for c in cats:
-        if c.lower() in q:
-            return c
-    # prefer low-cardinality meaningful cols (2–50 unique), skip IDs
-    good = [c for c in cats
-            if 2 <= df[c].nunique() <= 50
-            and not any(kw in c.lower() for kw in ["id","uuid","key","code","hash","index","ref"])]
-    return good[0] if good else cats[0]
-
-
-def _best_num(df: pd.DataFrame, query: str = "") -> Optional[str]:
-    """Pick the most business-relevant numeric column."""
-    nums = df.select_dtypes(include="number").columns.tolist()
-    if not nums:
-        return None
-    q = query.lower()
-    for c in nums:
-        if c.lower() in q:
-            return c
-    # prefer revenue/sales/profit/amount/value cols
-    priority = ["revenue","sales","profit","amount","value","income","total","price","cost","spend"]
-    for kw in priority:
-        for c in nums:
-            if kw in c.lower():
-                return c
-    return nums[0]
-
-
 def _fmt(v) -> str:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return "N/A"
-    if isinstance(v, (float, np.floating)):
-        if abs(v) >= 1_000_000: return f"{v/1_000_000:,.2f}M"
-        if abs(v) >= 1_000:     return f"{v:,.0f}"
-        return f"{v:.2f}"
-    if isinstance(v, (int, np.integer)):
-        return f"{int(v):,}"
-    return str(v)
+    try:
+        f = float(v)
+        if math.isnan(f): return "N/A"
+        if abs(f) >= 1_000_000_000: return f"{f/1_000_000_000:,.2f}B"
+        if abs(f) >= 1_000_000:     return f"{f/1_000_000:,.2f}M"
+        if abs(f) >= 1_000:         return f"{f:,.0f}"
+        return f"{f:.2f}"
+    except (TypeError, ValueError):
+        return str(v)
 
 
 def _pct(a, b) -> str:
     return f"{100*a/b:.1f}%" if b else "0%"
 
 
-def _change_pct(new, old) -> str:
+def _chg(new, old) -> str:
     if not old: return "N/A"
     c = (new - old) / abs(old) * 100
-    sign = "+" if c >= 0 else ""
-    return f"{sign}{c:.1f}%"
+    return f"{'+' if c>=0 else ''}{c:.1f}%"
 
 
-# ─── BI Modules ──────────────────────────────────────────────────────────────
+def _series(df, col):
+    return pd.to_numeric(df[col], errors="coerce").dropna()
 
-def _revenue_performance(df: pd.DataFrame, query: str) -> list[str]:
-    num = _best_num(df, query)
-    cat = _best_cat(df, query)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BI MODULES — each uses DataProfile, fully domain-agnostic
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _overview(p: DataProfile) -> list[str]:
+    df  = p.df
+    num = p.value_col
+    cat = p.group_cols[0] if p.group_cols else None
+
+    lines = [f"**Dataset Overview ({p.domain.title()} data)**"]
+    lines.append(f"• {p.rows:,} records × {p.cols_count} columns")
+    lines.append(f"• Numeric columns: {len(p.numeric_cols)}  |  "
+                 f"Categorical: {len(p.cat_cols)}  |  "
+                 f"Date: {len(p.date_cols)}")
+
+    missing = int(df.isna().sum().sum())
+    dups    = int(df.duplicated().sum())
+    total   = p.rows * p.cols_count
+    lines.append(f"• Completeness: {_pct(total-missing, total)}  |  "
+                 f"Duplicates: {dups:,}")
+
+    if num:
+        s = _series(df, num)
+        lines.append(f"\n**Key metric: {num}**")
+        lines.append(f"• Total: {_fmt(s.sum())}  |  Avg: {_fmt(s.mean())}  |  "
+                     f"Median: {_fmt(s.median())}  |  Std: {_fmt(s.std())}")
+        lines.append(f"• Range: {_fmt(s.min())} → {_fmt(s.max())}")
+
+    if cat and num:
+        agg = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).dropna()
+        grand = agg.sum()
+        lines.append(f"\n**Top values by {cat}:**")
+        for grp, val in agg.head(5).items():
+            lines.append(f"  • {grp}: {_fmt(val)} ({_pct(val, grand)})")
+
+    return lines
+
+
+def _performance_analysis(p: DataProfile) -> list[str]:
+    df  = p.df
+    num = p.value_col
+    cat = p.group_cols[0] if p.group_cols else None
+
     if not num:
-        return ["No numeric (revenue/sales/value) column found. Label your columns clearly — e.g. 'Revenue', 'Sales', 'Amount'."]
+        return ["No numeric column found to analyse performance. "
+                "Please upload data with at least one numeric column."]
 
-    s = pd.to_numeric(df[num], errors="coerce").dropna()
+    s     = _series(df, num)
     total = s.sum()
-    avg   = s.mean()
-    med   = s.median()
+    lines = [f"**Performance Analysis — {num}**"]
+    lines.append(f"• Total: {_fmt(total)}  |  Avg: {_fmt(s.mean())}  |  Median: {_fmt(s.median())}  |  Std dev: {_fmt(s.std())}")
 
-    lines = [f"**Revenue & Performance — {num}**"]
-    lines.append(f"• Total: {_fmt(total)}  |  Average per record: {_fmt(avg)}  |  Median: {_fmt(med)}")
+    # Spread interpretation
+    cv = s.std() / s.mean() if s.mean() else 0
+    if cv > 0.5:
+        lines.append(f"• High variability (CV={cv:.2f}) — values spread widely. "
+                     "Some records far outperform others.")
+    elif cv < 0.1:
+        lines.append(f"• Very consistent values (CV={cv:.2f}) — little variation across records.")
 
-    # Gap between mean and median signals skew
-    if avg > med * 1.3:
-        lines.append(f"⚠️ Mean ({_fmt(avg)}) is significantly higher than median ({_fmt(med)}) — a small number of high-value transactions are pulling the average up. "
-                     "Focus retention efforts on your top customers.")
-    elif med > avg * 1.3:
-        lines.append(f"⚠️ A few very low-value records are dragging down the average. Review minimum order thresholds or dormant accounts.")
+    # Mean vs median skew
+    if s.mean() > s.median() * 1.3:
+        lines.append(f"• Mean ({_fmt(s.mean())}) >> Median ({_fmt(s.median())}) — "
+                     "a small number of high values are pulling the average up. "
+                     "Most records cluster lower.")
+    elif s.median() > s.mean() * 1.3:
+        lines.append(f"• Median ({_fmt(s.median())}) >> Mean ({_fmt(s.mean())}) — "
+                     "a few very low values drag the average down.")
 
-    # 80/20 rule check
-    top20_idx = s.nlargest(max(1, len(s)//5)).index
-    top20_share = s[top20_idx].sum() / total if total else 0
-    lines.append(f"• Top 20% of records generate {_pct(s[top20_idx].sum(), total)} of total {num}.")
-    if top20_share >= 0.7:
-        lines.append(f"  → 🎯 Pareto alert: your top 20% drives ≥70% of {num}. Protect these accounts — they are your core business.")
+    # Top 20% contribution
+    top20 = s.nlargest(max(1, len(s)//5))
+    lines.append(f"• Top 20% of records account for {_pct(top20.sum(), total)} of total {num}.")
 
-    # Best and worst performers by category
+    # Group breakdown
     if cat:
         agg = df.groupby(cat, dropna=False)[num].agg(["sum","mean","count"]).dropna()
         agg.columns = ["total","avg","count"]
         agg = agg.sort_values("total", ascending=False)
-        top3 = agg.head(3)
-        bot3 = agg.tail(3)
 
         lines.append(f"\n**Top performers by {cat}:**")
-        for grp, row in top3.iterrows():
+        for grp, row in agg.head(5).iterrows():
             share = 100 * row["total"] / total if total else 0
-            lines.append(f"  🏆 {grp}: {_fmt(row['total'])} total ({share:.1f}% of all {num}), avg {_fmt(row['avg'])} per record")
+            lines.append(f"  🏆 {grp}: {_fmt(row['total'])} ({share:.1f}%),  avg {_fmt(row['avg'])},  n={int(row['count'])}")
 
-        lines.append(f"\n**Weakest performers by {cat}:**")
-        for grp, row in bot3.iterrows():
-            share = 100 * row["total"] / total if total else 0
-            lines.append(f"  🔻 {grp}: {_fmt(row['total'])} total ({share:.1f}%), avg {_fmt(row['avg'])} — investigate or cut losses")
+        if len(agg) > 3:
+            lines.append(f"\n**Lowest performers by {cat}:**")
+            for grp, row in agg.tail(3).iterrows():
+                share = 100 * row["total"] / total if total else 0
+                lines.append(f"  🔻 {grp}: {_fmt(row['total'])} ({share:.1f}%),  avg {_fmt(row['avg'])}")
 
-        # Concentration risk
-        top1_share = 100 * agg["total"].iloc[0] / total if total else 0
-        if top1_share >= 40:
-            lines.append(f"\n🚨 Concentration risk: '{agg.index[0]}' alone accounts for {top1_share:.0f}% of {num}. "
-                         "Heavy dependence on one segment/product/region is a business risk. Diversify.")
+        # Concentration check (only meaningful if not an ID column)
+        top1 = 100 * agg["total"].iloc[0] / total if total else 0
+        if top1 >= 40 and len(agg) >= 3:
+            lines.append(f"\n⚠️ '{agg.index[0]}' accounts for {top1:.0f}% of {num}. "
+                         "High concentration — understand why this group dominates.")
 
     return lines
 
 
-def _trend_intelligence(df: pd.DataFrame, query: str) -> list[str]:
-    num      = _best_num(df, query)
-    date_cols = _detect_dates(df)
+def _trend_analysis(p: DataProfile) -> list[str]:
+    df  = p.df
+    num = p.value_col
+    lines = [f"**Trend Analysis — {num or 'data'}**"]
 
     if not num:
-        return ["No numeric column found for trend analysis."]
+        return lines + ["No numeric column found for trend analysis."]
 
-    lines = [f"**Trend Intelligence — {num}**"]
-
-    if not date_cols:
-        # No date col — use record order
-        s = pd.to_numeric(df[num], errors="coerce").dropna().reset_index(drop=True)
+    if not p.date_col:
+        # No date — use record order
+        s = _series(df, num).reset_index(drop=True)
         n = len(s)
         if n < 6:
             return lines + ["Not enough records for trend analysis (need at least 6)."]
         q = max(n//4, 1)
-        periods = [s.iloc[:q].mean(), s.iloc[q:2*q].mean(), s.iloc[2*q:3*q].mean(), s.iloc[3*q:].mean()]
-        labels  = ["Earliest records","Early-mid","Late-mid","Most recent"]
-        lines.append("No date column detected — using record order as time proxy.")
-        for label, val in zip(labels, periods):
-            lines.append(f"  {label}: {_fmt(val)}")
-        chg = _change_pct(periods[-1], periods[0])
-        direction = "grown" if periods[-1] > periods[0] else "declined"
-        lines.append(f"\n📈 Overall: {num} has {direction} {chg} from earliest to most recent records.")
-        if periods[-1] < periods[0] * 0.9:
-            lines.append("  ⚠️ Declining trend — investigate root causes. Is this seasonal, a lost customer, or a systemic issue?")
+        periods = [s.iloc[:q].mean(), s.iloc[q:2*q].mean(),
+                   s.iloc[2*q:3*q].mean(), s.iloc[3*q:].mean()]
+        labels  = ["Earliest 25%","Early-mid 25%","Late-mid 25%","Most recent 25%"]
+        lines.append("(No date column — using record order as time proxy)")
+        for lbl, val in zip(labels, periods):
+            lines.append(f"  {lbl}: {_fmt(val)}")
+        chg  = _chg(periods[-1], periods[0])
+        word = "increased" if periods[-1] > periods[0] else "decreased"
+        lines.append(f"\n• {num} has {word} {chg} from earliest to most recent records.")
+        if periods[-1] < periods[0] * 0.85:
+            lines.append("⚠️ Notable decline — investigate what changed over time.")
         elif periods[-1] > periods[0] * 1.1:
-            lines.append("  ✅ Growing trend — identify what's driving this and double down on it.")
+            lines.append("✅ Clear upward trend — identify what is driving improvement.")
         return lines
 
-    dc  = date_cols[0]
+    dc  = p.date_col
     tmp = df.copy()
     tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
     tmp = tmp.dropna(subset=[dc, num]).sort_values(dc)
     tmp[num] = pd.to_numeric(tmp[num], errors="coerce")
+    days = (tmp[dc].max() - tmp[dc].min()).days
 
-    date_range_days = (tmp[dc].max() - tmp[dc].min()).days
-    lines.append(f"• Period: {tmp[dc].min().date()} → {tmp[dc].max().date()} ({date_range_days} days)")
+    if   days > 365:  code, label = "Q", "quarter"
+    elif days > 60:   code, label = "M", "month"
+    elif days > 14:   code, label = "W", "week"
+    else:             code, label = "D", "day"
 
-    # Choose best period grouping
-    if date_range_days > 365:
-        tmp["period"] = tmp[dc].dt.to_period("Q").astype(str)
-        period_label = "quarter"
-    elif date_range_days > 60:
-        tmp["period"] = tmp[dc].dt.to_period("M").astype(str)
-        period_label = "month"
-    else:
-        tmp["period"] = tmp[dc].dt.to_period("W").astype(str)
-        period_label = "week"
+    tmp["_p"] = tmp[dc].dt.to_period(code).astype(str)
+    agg = tmp.groupby("_p")[num].sum().dropna()
 
-    agg = tmp.groupby("period")[num].sum().dropna()
+    lines.append(f"• Date range: {tmp[dc].min().date()} → {tmp[dc].max().date()} ({days} days)")
+    lines.append(f"• Aggregated by {label} — {len(agg)} periods")
+
     if len(agg) < 2:
-        return lines + ["Not enough time periods to compute a trend (need at least 2)."]
+        return lines + ["Need at least 2 periods for trend analysis."]
 
-    # First vs last period
-    first_val = agg.iloc[0]
-    last_val  = agg.iloc[-1]
-    chg       = _change_pct(last_val, first_val)
-    direction = "▲ grew" if last_val >= first_val else "▼ declined"
-
-    lines.append(f"• {num} {direction} {chg} from first {period_label} to last {period_label}")
-    lines.append(f"  First {period_label} ({agg.index[0]}): {_fmt(first_val)}")
-    lines.append(f"  Last  {period_label} ({agg.index[-1]}): {_fmt(last_val)}")
-
-    # Best and worst period
-    best_p  = agg.idxmax()
-    worst_p = agg.idxmin()
-    lines.append(f"\n• Best {period_label}: {best_p} → {_fmt(agg[best_p])}")
-    lines.append(f"• Worst {period_label}: {worst_p} → {_fmt(agg[worst_p])}")
+    chg  = _chg(agg.iloc[-1], agg.iloc[0])
+    word = "▲ up" if agg.iloc[-1] >= agg.iloc[0] else "▼ down"
+    lines.append(f"\n• Overall: {word} {chg} (first → last {label})")
+    lines.append(f"  First {label} ({agg.index[0]}):  {_fmt(agg.iloc[0])}")
+    lines.append(f"  Last  {label} ({agg.index[-1]}): {_fmt(agg.iloc[-1])}")
+    lines.append(f"  Peak  {label}: {agg.idxmax()} → {_fmt(agg.max())}")
+    lines.append(f"  Trough {label}: {agg.idxmin()} → {_fmt(agg.min())}")
 
     # Volatility
     cv = agg.std() / agg.mean() if agg.mean() else 0
     if cv > 0.3:
-        lines.append(f"\n⚠️ High volatility (CV={cv:.2f}) — {num} fluctuates significantly period to period. "
-                     "Inconsistent performance may indicate seasonal effects, irregular ordering, or operational issues.")
+        lines.append(f"\n⚠️ High variability (CV={cv:.2f}) — significant fluctuation between periods.")
     else:
-        lines.append(f"\n✅ Relatively stable performance (CV={cv:.2f}) across periods.")
+        lines.append(f"\n✅ Stable trend (CV={cv:.2f}) — consistent values across periods.")
 
-    # Last 2 periods momentum
+    # Recent momentum
     if len(agg) >= 3:
-        prev    = agg.iloc[-2]
-        current = agg.iloc[-1]
-        mom     = _change_pct(current, prev)
-        if current < prev * 0.85:
-            lines.append(f"🚨 Recent momentum: last {period_label} dropped {mom} vs prior. Immediate attention needed.")
-        elif current > prev * 1.15:
-            lines.append(f"🚀 Recent momentum: last {period_label} grew {mom} vs prior. What drove this? Replicate it.")
+        mom = _chg(agg.iloc[-1], agg.iloc[-2])
+        if agg.iloc[-1] < agg.iloc[-2] * 0.85:
+            lines.append(f"⚠️ Last {label} dropped {mom} vs previous — recent downturn.")
+        elif agg.iloc[-1] > agg.iloc[-2] * 1.15:
+            lines.append(f"🚀 Last {label} up {mom} vs previous — recent acceleration.")
 
     return lines
 
 
-def _customer_segment_analysis(df: pd.DataFrame, query: str) -> list[str]:
-    num = _best_num(df, query)
-    cat = _best_cat(df, query)
+def _segment_analysis(p: DataProfile) -> list[str]:
+    df  = p.df
+    num = p.value_col
+    cat = p.group_cols[0] if p.group_cols else None
 
     if not cat or not num:
-        return ["Need at least one categorical column (e.g. Customer, Region, Product, Segment) and one numeric column (e.g. Revenue)."]
+        return [
+            "Segment analysis requires at least one categorical (text) column for grouping.",
+            f"Your dataset has {len(p.numeric_cols)} numeric column(s) but no suitable categorical grouper. ",
+            "Try adding a column like 'Category', 'Region', 'Type', or 'Group' to enable segment analysis.",
+            f"Available columns: {', '.join(df.columns.tolist())}",
+        ]
 
     lines = [f"**Segment Analysis — {num} by {cat}**"]
-    agg = df.groupby(cat, dropna=False)[num].agg(["sum","mean","count"]).dropna()
-    agg.columns = ["total","avg","count"]
+    agg = df.groupby(cat, dropna=False)[num].agg(["sum","mean","count","std"]).dropna()
+    agg.columns = ["total","avg","count","std"]
     agg = agg.sort_values("total", ascending=False)
-    grand_total = agg["total"].sum()
+    grand = agg["total"].sum()
 
-    # Segment summary
-    lines.append(f"• {agg.shape[0]} segments in '{cat}'")
-    lines.append(f"• Grand total {num}: {_fmt(grand_total)}")
-
-    lines.append(f"\n**Segment breakdown:**")
+    lines.append(f"• {agg.shape[0]} unique values in '{cat}'  |  Grand total {num}: {_fmt(grand)}")
+    lines.append(f"\n**Breakdown:**")
     cum = 0
     for i, (grp, row) in enumerate(agg.iterrows()):
-        share = 100 * row["total"] / grand_total if grand_total else 0
+        share = 100 * row["total"] / grand if grand else 0
         cum  += share
-        flag  = " ← 80% threshold crossed" if cum >= 80 and (cum - share) < 80 else ""
+        marker = "  ← 80% cumulative" if cum >= 80 and (cum - share) < 80 else ""
         lines.append(
-            f"  {i+1}. {grp}: {_fmt(row['total'])} ({share:.1f}%)  "
-            f"avg={_fmt(row['avg'])}  n={int(row['count'])}{flag}"
+            f"  {i+1}. {grp}: {_fmt(row['total'])} ({share:.1f}%),  "
+            f"avg={_fmt(row['avg'])},  n={int(row['count'])}{marker}"
         )
 
-    # Concentration
-    if len(agg) >= 3:
-        top3_share = 100 * agg["total"].iloc[:3].sum() / grand_total if grand_total else 0
-        lines.append(f"\n• Top 3 segments = {top3_share:.0f}% of all {num}")
-        if top3_share >= 80:
-            lines.append(f"  🎯 High concentration — 3 segments drive 80%+ of value. These are your priority. "
-                         "But also a risk if any one drops off.")
-
-    # Underperforming segments
-    avg_val = agg["avg"].mean()
-    underperformers = agg[agg["avg"] < avg_val * 0.5]
-    if not underperformers.empty:
-        lines.append(f"\n⚠️ Underperforming segments (avg {num} < 50% of overall average {_fmt(avg_val)}):")
-        for grp, row in underperformers.head(3).iterrows():
-            lines.append(f"  • {grp}: avg {_fmt(row['avg'])} per record — review pricing, activity, or cut")
+    # Second grouper comparison if available
+    if len(p.group_cols) >= 2:
+        cat2 = p.group_cols[1]
+        lines.append(f"\n**Cross-analysis: {num} by {cat} × {cat2}**")
+        pivot = df.groupby([cat, cat2], dropna=False)[num].sum().unstack(fill_value=0)
+        for grp in pivot.index[:5]:
+            row_vals = pivot.loc[grp]
+            top_sub  = row_vals.idxmax()
+            lines.append(f"  {grp}: highest in '{top_sub}' ({_fmt(row_vals[top_sub])})")
 
     return lines
 
 
-def _profitability_analysis(df: pd.DataFrame, query: str) -> list[str]:
-    """Find revenue, cost, profit relationships."""
-    nums = df.select_dtypes(include="number").columns.tolist()
-    cat  = _best_cat(df, query)
+def _opportunity_analysis(p: DataProfile) -> list[str]:
+    df  = p.df
+    num = p.value_col
+    cat = p.group_cols[0] if p.group_cols else None
 
-    # Try to detect revenue and cost columns
-    rev_kw  = ["revenue","sales","income","turnover","amount","price","value","total"]
-    cost_kw = ["cost","expense","spend","cogs","purchase","payment","outgoing"]
+    lines = [f"**Opportunity Analysis — {num or 'data'}**"]
 
-    rev_col  = next((c for kw in rev_kw  for c in nums if kw in c.lower()), None)
-    cost_col = next((c for kw in cost_kw for c in nums if kw in c.lower() and c != rev_col), None)
+    if not num:
+        return lines + ["No numeric column found."]
 
-    if not rev_col:
-        return _revenue_performance(df, query)
-
-    lines = [f"**Profitability Analysis**"]
-    rev_s = pd.to_numeric(df[rev_col], errors="coerce").dropna()
-    lines.append(f"• Revenue column: {rev_col}  →  Total: {_fmt(rev_s.sum())}, Avg: {_fmt(rev_s.mean())}")
-
-    if cost_col:
-        cost_s = pd.to_numeric(df[cost_col], errors="coerce")
-        df2 = df.copy()
-        df2["__profit__"] = pd.to_numeric(df2[rev_col], errors="coerce") - pd.to_numeric(df2[cost_col], errors="coerce")
-        profit_s = df2["__profit__"].dropna()
-        total_rev  = rev_s.sum()
-        total_cost = cost_s.dropna().sum()
-        total_profit = profit_s.sum()
-        margin = 100 * total_profit / total_rev if total_rev else 0
-
-        lines.append(f"• Cost column: {cost_col}  →  Total: {_fmt(total_cost)}")
-        lines.append(f"• Net profit: {_fmt(total_profit)}  |  Margin: {margin:.1f}%")
-
-        if margin < 10:
-            lines.append(f"  🚨 Margin of {margin:.1f}% is very thin. Any cost increase or revenue dip could result in a loss. "
-                         "Identify the biggest cost drivers immediately.")
-        elif margin < 25:
-            lines.append(f"  ⚠️ Margin of {margin:.1f}% is acceptable but has room for improvement. "
-                         "Review high-cost segments and consider price optimisation.")
-        else:
-            lines.append(f"  ✅ Margin of {margin:.1f}% is healthy. Focus on scaling volume.")
-
-        # Loss-making records
-        losses = df2[df2["__profit__"] < 0]
-        if not losses.empty:
-            loss_total = abs(losses["__profit__"].sum())
-            lines.append(f"\n⚠️ {len(losses):,} records are loss-making (negative profit) totalling {_fmt(loss_total)} in losses.")
-            if cat and cat in df2.columns:
-                loss_by_cat = losses.groupby(cat, dropna=False)["__profit__"].sum().sort_values().head(3)
-                lines.append(f"  Biggest loss-makers by {cat}:")
-                for grp, val in loss_by_cat.items():
-                    lines.append(f"    {grp}: {_fmt(val)}")
-
-        # Best margin segment
-        if cat and cat in df.columns:
-            grp = df2.groupby(cat, dropna=False).agg(
-                rev   =(rev_col,  "sum"),
-                profit=("__profit__", "sum"),
-            ).dropna()
-            grp["margin"] = 100 * grp["profit"] / grp["rev"].replace(0, np.nan)
-            grp = grp.sort_values("margin", ascending=False).dropna(subset=["margin"])
-            if not grp.empty:
-                lines.append(f"\n**Margin by {cat}:**")
-                for g, r in grp.iterrows():
-                    flag = " 🏆" if r["margin"] == grp["margin"].max() else (" 🚨" if r["margin"] < 0 else "")
-                    lines.append(f"  {g}: {r['margin']:.1f}% margin  (revenue {_fmt(r['rev'])}, profit {_fmt(r['profit'])}){flag}")
-    else:
-        lines.append(f"\n💡 No cost column detected. To get profitability analysis, add a column named 'Cost', 'Expense', or 'COGS'.")
-
-    return lines
-
-
-def _growth_opportunity(df: pd.DataFrame, query: str) -> list[str]:
-    """Identify growth opportunities and underserved segments."""
-    num = _best_num(df, query)
-    cat = _best_cat(df, query)
-    date_cols = _detect_dates(df)
-
-    lines = ["**Growth Opportunities**"]
-
-    if not num or not cat:
-        return lines + ["Need at least one numeric column and one categorical column to identify growth opportunities."]
+    if not cat:
+        # No categorical — do percentile-based opportunity analysis
+        s = _series(df, num)
+        p90 = s.quantile(0.9)
+        p10 = s.quantile(0.1)
+        below_avg = s[s < s.mean()]
+        lines.append(f"• Top 10% of records have {num} ≥ {_fmt(p90)}")
+        lines.append(f"• Bottom 10% of records have {num} ≤ {_fmt(p10)}")
+        lines.append(f"• {len(below_avg):,} records ({_pct(len(below_avg),len(s))}) are below average")
+        lines.append(f"\n💡 Opportunity: if below-average records reached the average, "
+                     f"total would increase by ~{_fmt((s.mean()-below_avg.mean())*len(below_avg))}")
+        return lines
 
     agg = df.groupby(cat, dropna=False)[num].agg(["sum","mean","count"]).dropna()
     agg.columns = ["total","avg","count"]
-    grand_total = agg["total"].sum()
-    overall_avg = agg["avg"].mean()
+    grand   = agg["total"].sum()
+    avg_all = agg["avg"].mean()
 
-    # High volume, low average = undermonetised
-    high_count = agg[agg["count"] > agg["count"].quantile(0.75)]
-    if not high_count.empty:
-        low_avg_high_vol = high_count[high_count["avg"] < overall_avg * 0.8]
-        if not low_avg_high_vol.empty:
-            lines.append(f"\n🎯 High-volume, undermonetised segments (many transactions but low average {num}):")
-            for grp, row in low_avg_high_vol.head(3).iterrows():
-                upside = (overall_avg - row["avg"]) * row["count"]
-                lines.append(
-                    f"  • {grp}: {int(row['count']):,} records at avg {_fmt(row['avg'])} "
-                    f"— raising to average would add {_fmt(upside)} revenue"
-                )
-            lines.append("  → These segments buy frequently. A price increase or upsell could significantly lift revenue.")
+    # Volume vs Value matrix
+    lines.append(f"\n**Volume vs Value matrix — {cat}:**")
+    for grp, row in agg.sort_values("total", ascending=False).iterrows():
+        v_high = row["count"] >= agg["count"].median()
+        a_high = row["avg"]   >= avg_all
+        tag = {
+            (True,  True):  "✅ Core — high activity + high value. Protect and scale.",
+            (True,  False): "🎯 Leverage — high activity, low avg value. Increase value per record.",
+            (False, True):  "💎 Premium — low activity, high value. Grow frequency/volume.",
+            (False, False): "⚠️ Weak — low activity + low value. Review or exit.",
+        }[(v_high, a_high)]
+        lines.append(
+            f"  {grp}: {int(row['count']):,} records @ avg {_fmt(row['avg'])}, "
+            f"total {_fmt(row['total'])} ({_pct(row['total'],grand)}) — {tag}"
+        )
 
-    # Low volume, high average = scalable premium segments
-    low_count = agg[agg["count"] < agg["count"].quantile(0.25)]
-    if not low_count.empty:
-        high_avg_low_vol = low_count[low_count["avg"] > overall_avg * 1.2]
-        if not high_avg_low_vol.empty:
-            lines.append(f"\n💎 High-value but low-frequency segments (premium opportunity):")
-            for grp, row in high_avg_low_vol.head(3).iterrows():
-                lines.append(
-                    f"  • {grp}: avg {_fmt(row['avg'])} per record but only {int(row['count']):,} records "
-                    f"— invest in growing this segment"
-                )
-            lines.append("  → These segments pay well. Find more like them or increase their purchase frequency.")
+    # Upside calculation
+    top_avg = agg["avg"].max()
+    upside  = sum((top_avg - row["avg"]) * row["count"]
+                  for _, row in agg.iterrows() if row["avg"] < top_avg)
+    if upside > 0:
+        lines.append(f"\n💡 Gap opportunity: if all groups reached the top avg ({_fmt(top_avg)}), "
+                     f"total {num} could increase by ~{_fmt(upside)} ({_pct(upside, grand)} more).")
 
-    # Zero or missing segments (gaps)
-    all_cats = df[cat].dropna().astype(str).unique()
-    if len(all_cats) <= 20:
-        lines.append(f"\n📊 All {len(all_cats)} segments are active in {cat}.")
-
-    # Trend by segment if date available
-    if date_cols:
-        dc = date_cols[0]
+    # Time-based growth per group
+    if p.date_col:
+        dc  = p.date_col
         tmp = df.copy()
         tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
         tmp = tmp.dropna(subset=[dc]).sort_values(dc)
         half = tmp[dc].quantile(0.5)
-        first_half = tmp[tmp[dc] <= half].groupby(cat, dropna=False)[num].sum()
-        second_half = tmp[tmp[dc] > half].groupby(cat, dropna=False)[num].sum()
-        both = pd.DataFrame({"h1": first_half, "h2": second_half}).dropna()
-        both["growth"] = (both["h2"] - both["h1"]) / both["h1"].abs().replace(0, np.nan) * 100
-        both = both.dropna(subset=["growth"])
+        h1 = tmp[tmp[dc] <= half].groupby(cat, dropna=False)[num].sum()
+        h2 = tmp[tmp[dc] >  half].groupby(cat, dropna=False)[num].sum()
+        both = pd.DataFrame({"h1":h1,"h2":h2}).dropna()
+        both["chg"] = (both["h2"]-both["h1"]) / both["h1"].abs().replace(0,np.nan) * 100
+        both = both.dropna(subset=["chg"]).sort_values("chg", ascending=False)
         if not both.empty:
-            fastest = both["growth"].nlargest(3)
-            slowest = both["growth"].nsmallest(3)
-            lines.append(f"\n**Fastest-growing segments (first half vs second half of period):**")
-            for grp, g in fastest.items():
-                lines.append(f"  📈 {grp}: {'+' if g>=0 else ''}{g:.1f}%")
-            lines.append(f"\n**Fastest-declining segments:**")
-            for grp, g in slowest.items():
-                lines.append(f"  📉 {grp}: {g:.1f}%  — investigate cause")
+            lines.append(f"\n**Growth by {cat} (first half vs second half of period):**")
+            for grp, row in both.iterrows():
+                arrow  = "📈" if row["chg"] >= 0 else "📉"
+                action = "— accelerating" if row["chg"] > 15 else \
+                         ("— declining, investigate" if row["chg"] < -15 else "— stable")
+                lines.append(f"  {arrow} {grp}: {row['chg']:+.1f}% {action}")
 
     return lines
 
 
-def _risk_flags(df: pd.DataFrame, query: str) -> list[str]:
-    """Identify business risks in the data."""
-    num  = _best_num(df, query)
-    cat  = _best_cat(df, query)
-    date_cols = _detect_dates(df)
+def _anomaly_analysis(p: DataProfile) -> list[str]:
+    df    = p.df
+    lines = ["**Anomaly & Quality Analysis**"]
+    found = 0
 
-    lines = ["**Business Risk Flags**"]
+    # 1. Missing values
+    missing     = int(df.isna().sum().sum())
+    total_cells = p.rows * p.cols_count
+    dups        = int(df.duplicated().sum())
 
-    # Data quality risks
-    missing = int(df.isna().sum().sum())
-    total_cells = df.shape[0] * df.shape[1]
-    dups = int(df.duplicated().sum())
-    if missing > 0:
-        miss_pct = 100*missing/total_cells
-        lines.append(f"⚠️ Data quality: {missing:,} missing values ({miss_pct:.1f}%). "
-                     "Decisions based on incomplete data carry risk.")
-        worst = df.isna().sum().sort_values(ascending=False).head(3)
-        for col, cnt in worst.items():
-            if cnt > 0:
-                lines.append(f"   Column '{col}': {cnt:,} missing ({_pct(cnt, df.shape[0])})")
-    if dups > 0:
-        lines.append(f"⚠️ {dups:,} duplicate records — could inflate totals or KPIs. Clean on the Cleaning page.")
+    if missing:
+        worst = df.isna().sum().sort_values(ascending=False)
+        worst = worst[worst > 0]
+        lines.append(f"⚠️ Missing values: {missing:,} ({_pct(missing, total_cells)}) across {len(worst)} column(s).")
+        for col, cnt in worst.head(3).items():
+            lines.append(f"  • '{col}': {cnt:,} missing ({_pct(cnt, p.rows)})")
+        found += 1
+    else:
+        lines.append("✅ No missing values — dataset is complete.")
 
-    # Revenue concentration risk
-    if num and cat:
-        agg = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).dropna()
-        grand = agg.sum()
-        if grand > 0 and len(agg) >= 2:
-            top1_share = agg.iloc[0] / grand * 100
-            top3_share = agg.iloc[:3].sum() / grand * 100
-            if top1_share >= 40:
-                lines.append(f"🚨 Concentration risk: '{agg.index[0]}' accounts for {top1_share:.0f}% of {num}. "
-                             "Losing this single account/segment could be catastrophic.")
-            if top3_share >= 80 and len(agg) > 3:
-                lines.append(f"🚨 Top 3 segments = {top3_share:.0f}% of {num}. Business is fragile if any one declines.")
+    if dups:
+        lines.append(f"⚠️ {dups:,} duplicate rows ({_pct(dups, p.rows)}) — "
+                     "may inflate totals. Remove on Cleaning page.")
+        found += 1
+    else:
+        lines.append("✅ No duplicate rows.")
 
-    # Outlier / spike risk
-    if num:
-        s = pd.to_numeric(df[num], errors="coerce").dropna()
-        if len(s) >= 4:
-            q1, q3 = s.quantile(0.25), s.quantile(0.75)
-            iqr = q3 - q1
-            outliers = s[(s < q1 - 3*iqr) | (s > q3 + 3*iqr)]
-            if not outliers.empty:
-                lines.append(f"⚠️ {len(outliers):,} extreme value(s) in '{num}' — "
-                             f"range {_fmt(outliers.min())} to {_fmt(outliers.max())}. "
-                             "Verify these are real and not data entry errors.")
+    # 2. Statistical outliers per numeric column
+    outlier_found = False
+    for col in p.numeric_cols[:6]:
+        s = _series(df, col)
+        if len(s) < 8:
+            continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+        iqr = q3 - q1
+        if iqr <= 0:
+            continue
+        extreme = s[(s < q1 - 3*iqr) | (s > q3 + 3*iqr)]
+        if not extreme.empty:
+            lines.append(f"⚠️ '{col}': {len(extreme):,} extreme value(s) — "
+                         f"range {_fmt(extreme.min())} to {_fmt(extreme.max())} "
+                         f"(normal range: {_fmt(q1-1.5*iqr)} – {_fmt(q3+1.5*iqr)}). "
+                         "Verify these are real, not data entry errors.")
+            outlier_found = True
+            found += 1
 
-    # Trend reversal risk
-    if num and date_cols:
-        dc = date_cols[0]
-        tmp = df[[dc, num]].copy()
-        tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
-        tmp = tmp.dropna().sort_values(dc)
-        tmp[num] = pd.to_numeric(tmp[num], errors="coerce")
-        if len(tmp) >= 6:
-            n = max(len(tmp)//4, 1)
-            peak = tmp[num].rolling(n).mean().max()
-            latest = tmp[num].iloc[-n:].mean()
-            if pd.notna(peak) and peak > 0 and latest < peak * 0.7:
-                lines.append(f"📉 {num} is currently {_pct(latest, peak)} of its peak value. "
-                             "This is a significant decline from historical high — investigate.")
+    if not outlier_found:
+        lines.append("✅ No extreme outliers detected in numeric columns.")
 
-    # Negative values in revenue
-    if num:
-        s = pd.to_numeric(df[num], errors="coerce").dropna()
-        neg = s[s < 0]
-        if not neg.empty:
-            lines.append(f"🔴 {len(neg):,} negative values in '{num}' totalling {_fmt(neg.sum())}. "
-                         "These could be refunds, chargebacks, or data errors — investigate each one.")
+    # 3. Constant columns (no useful information)
+    constants = [c for c in p.numeric_cols if _series(df, c).nunique() <= 1]
+    if constants:
+        lines.append(f"⚠️ Constant columns (single value, no information): {', '.join(constants)}")
+        found += 1
 
-    if len(lines) == 1:
-        lines.append("✅ No major business risks detected in this dataset.")
+    # 4. High cardinality text columns (possible ID columns)
+    for col in p.cat_cols:
+        ratio = df[col].nunique() / p.rows
+        if ratio > 0.8:
+            lines.append(f"⚠️ '{col}' has {df[col].nunique():,} unique values ({ratio:.0%} of rows) — "
+                         "likely an ID or free-text field. Not useful for grouping.")
+            found += 1
+            break  # just flag one
+
+    if found == 0:
+        lines.append("\n✅ Data looks clean and well-structured overall.")
 
     return lines
 
 
-def _pricing_analysis(df: pd.DataFrame, query: str) -> list[str]:
-    """Analyse pricing effectiveness."""
-    nums = df.select_dtypes(include="number").columns.tolist()
-    cat  = _best_cat(df, query)
+def _correlation_analysis(p: DataProfile) -> list[str]:
+    df   = p.df
+    nums = p.numeric_cols
+    lines = ["**Correlation Analysis — Which numbers move together?**"]
 
-    price_kw = ["price","rate","fee","charge","tariff","unit_price","selling"]
-    qty_kw   = ["qty","quantity","units","volume","count","pieces","items"]
-    rev_kw   = ["revenue","sales","amount","total","value","income"]
+    if len(nums) < 2:
+        return lines + ["Need at least 2 numeric columns for correlation analysis."]
 
-    price_col = next((c for kw in price_kw for c in nums if kw in c.lower()), None)
-    qty_col   = next((c for kw in qty_kw   for c in nums if kw in c.lower()), None)
-    rev_col   = next((c for kw in rev_kw   for c in nums if kw in c.lower()), None)
+    # Exclude ID-like columns
+    good_nums = []
+    for col in nums[:10]:
+        s = _series(df, col)
+        if s.nunique() > 1 and not (s.is_monotonic_increasing and s.nunique() == len(s)):
+            good_nums.append(col)
 
-    lines = ["**Pricing Analysis**"]
+    if len(good_nums) < 2:
+        return lines + ["Not enough non-ID numeric columns for correlation."]
 
-    if not price_col and not (qty_col and rev_col):
-        lines.append("💡 For pricing analysis, include columns named 'Price', 'Rate', or 'Unit_Price'.")
-        lines.append("   Alternatively, have both 'Quantity' and 'Revenue' columns to compute implied price.")
-        return lines
+    corr = df[good_nums].corr(numeric_only=True)
+    pairs = []
+    for i in range(len(good_nums)):
+        for j in range(i+1, len(good_nums)):
+            v = corr.iloc[i,j]
+            if not math.isnan(v):
+                pairs.append((good_nums[i], good_nums[j], v))
 
-    # Compute implied price if no direct price col
-    if not price_col and qty_col and rev_col:
-        df2 = df.copy()
-        df2["__implied_price__"] = pd.to_numeric(df2[rev_col], errors="coerce") / pd.to_numeric(df2[qty_col], errors="coerce").replace(0, np.nan)
-        price_col = "__implied_price__"
-        lines.append(f"• Implied price = {rev_col} ÷ {qty_col}")
+    pairs.sort(key=lambda x: abs(x[2]), reverse=True)
 
-    p = pd.to_numeric(df[price_col] if price_col in df.columns else df["__implied_price__"] if "__implied_price__" in df.columns else pd.Series(dtype=float), errors="coerce").dropna()
+    strong  = [(a,b,r) for a,b,r in pairs if abs(r) >= 0.7]
+    moderate = [(a,b,r) for a,b,r in pairs if 0.4 <= abs(r) < 0.7]
+    weak     = [(a,b,r) for a,b,r in pairs if abs(r) < 0.4]
 
-    if p.empty:
-        return lines + ["Could not compute price values."]
-
-    lines.append(f"• Price range: {_fmt(p.min())} – {_fmt(p.max())}")
-    lines.append(f"• Average price: {_fmt(p.mean())}  |  Median: {_fmt(p.median())}")
-    cv = p.std() / p.mean() if p.mean() else 0
-    if cv > 0.3:
-        lines.append(f"⚠️ High price variation (CV={cv:.2f}) — are different customers being charged different rates? "
-                     "Review pricing consistency.")
-
-    if cat and cat in df.columns:
-        agg = df.groupby(cat, dropna=False).apply(
-            lambda x: pd.to_numeric(x[price_col] if price_col in df.columns else None, errors="coerce").mean()
-            if price_col in df.columns else np.nan
-        ).dropna().sort_values(ascending=False)
-        if not agg.empty:
-            lines.append(f"\n**Average price by {cat}:**")
-            for grp, val in agg.items():
-                flag = " ← highest" if val == agg.max() else (" ← lowest" if val == agg.min() else "")
-                lines.append(f"  {grp}: {_fmt(val)}{flag}")
-            price_gap = (agg.max() - agg.min()) / agg.mean() * 100 if agg.mean() else 0
-            if price_gap > 50:
-                lines.append(f"\n⚠️ {price_gap:.0f}% price gap between highest and lowest {cat}. "
-                             "Is this intentional (tiered pricing) or an inconsistency to fix?")
-
+    if strong:
+        lines.append(f"\n**Strong correlations (|r| ≥ 0.7):**")
+        for a, b, r in strong[:5]:
+            direction = "positive" if r > 0 else "negative"
+            lines.append(f"  • {a} ↔ {b}: r={r:.3f} — strong {direction} relationship. "
+                         f"{'One tends to increase with the other.' if r>0 else 'One tends to increase as the other decreases.'}")
+    if moderate:
+        lines.append(f"\n**Moderate correlations (0.4 ≤ |r| < 0.7):**")
+        for a, b, r in moderate[:4]:
+            lines.append(f"  • {a} ↔ {b}: r={r:.3f}")
+    if not strong and not moderate:
+        lines.append("• No strong correlations found. Variables appear largely independent.")
+    lines.append(f"\n• Weakly correlated pairs: {len(weak)} (|r| < 0.4) — no meaningful relationship.")
     return lines
 
 
-def _action_summary(df: pd.DataFrame, query: str) -> list[str]:
-    """Top business actions — always produces meaningful output."""
-    num       = _best_num(df, query)
-    cat       = _best_cat(df, query)
-    date_cols = _detect_dates(df)
-    nums      = df.select_dtypes(include="number").columns.tolist()
-
-    lines   = ["**Top Business Actions — What To Do Now**"]
+def _action_summary(p: DataProfile) -> list[str]:
+    df    = p.df
+    num   = p.value_col
+    cat   = p.group_cols[0] if p.group_cols else None
+    lines = [f"**Top Actions — {p.domain.title()} Data**"]
     actions = []
-    idx     = 1
+    idx = 1
 
-    # 1. Missing data — always check first
-    total_missing = int(df.isna().sum().sum())
-    if total_missing > 0:
-        worst_col = df.isna().sum().idxmax()
-        worst_cnt = int(df[worst_col].isna().sum())
-        pct = 100 * worst_cnt / max(len(df), 1)
-        actions.append(
-            f"{idx}. 🧹 **Fix missing data** — {total_missing:,} missing values across your dataset. "
-            f"Worst: '{worst_col}' has {worst_cnt:,} gaps ({pct:.1f}%). "
-            "Go to Cleaning page → choose Fill or Drop strategy. Decisions made on incomplete data are unreliable."
-        )
+    # 1. Data quality
+    missing = int(df.isna().sum().sum())
+    dups    = int(df.duplicated().sum())
+    if missing:
+        worst = df.isna().sum().idxmax()
+        cnt   = int(df[worst].isna().sum())
+        actions.append(f"{idx}. 🧹 **Fix missing data in '{worst}'** ({cnt:,} missing values). "
+                       "Go to Cleaning → Fill or Drop. Analysis on incomplete data gives wrong answers.")
+        idx += 1
+    if dups:
+        actions.append(f"{idx}. 🧹 **Remove {dups:,} duplicate rows** — "
+                       "they double-count your totals. Cleaning → Remove duplicates.")
         idx += 1
 
-    # 2. Duplicates
-    dups = int(df.duplicated().sum())
-    if dups > 0:
-        actions.append(
-            f"{idx}. 🧹 **Remove {dups:,} duplicate rows** — they inflate your totals and KPIs. "
-            "Go to Cleaning → Remove exact duplicates."
-        )
-        idx += 1
+    # 2. Key metric action
+    if num:
+        s  = _series(df, num)
+        cv = s.std() / s.mean() if s.mean() else 0
+        if cv > 0.6:
+            p10 = s.quantile(0.1)
+            p90 = s.quantile(0.9)
+            actions.append(f"{idx}. 📊 **High variability in '{num}'** (CV={cv:.2f}). "
+                           f"Values range from {_fmt(p10)} (10th pct) to {_fmt(p90)} (90th pct). "
+                           "Investigate why some records are much higher/lower than others.")
+            idx += 1
 
-    # 3. Concentration risk or top performer
+    # 3. Segment action
     if num and cat:
-        agg = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).dropna()
+        agg   = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).dropna()
         grand = agg.sum()
         if grand > 0 and len(agg) >= 2:
-            top1_share = agg.iloc[0] / grand * 100
-            if top1_share >= 30:
-                actions.append(
-                    f"{idx}. 🎯 **Protect '{agg.index[0]}'** — drives {top1_share:.0f}% of {num}. "
-                    "This is your most critical account/segment. Any disruption here is a major business risk. "
-                    "Prioritise relationship management and service quality."
-                )
-            else:
-                # Healthy spread — recommend doubling down on top
-                actions.append(
-                    f"{idx}. 🏆 **Double down on '{agg.index[0]}'** — your top {cat} segment "
-                    f"({top1_share:.0f}% of {num}). Allocate more resources and sales effort here. "
-                    f"Gap to #2 ('{agg.index[1]}') is {_fmt(agg.iloc[0] - agg.iloc[1])}."
-                )
+            top1_share = agg.iloc[0]/grand*100
+            bottom_share = agg.iloc[-1]/grand*100
+            actions.append(
+                f"{idx}. 🎯 **'{agg.index[0]}' leads {cat}** ({top1_share:.0f}% of {num}). "
+                f"Understand what makes it top-performing and apply those factors elsewhere. "
+                f"'{agg.index[-1]}' is the lowest ({bottom_share:.1f}%) — review why."
+            )
             idx += 1
 
     # 4. Trend action
-    if num and date_cols:
-        dc  = date_cols[0]
+    if num and p.date_col:
+        dc  = p.date_col
         tmp = df[[dc, num]].copy()
         tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
         tmp[num] = pd.to_numeric(tmp[num], errors="coerce")
         tmp = tmp.dropna().sort_values(dc)
         if len(tmp) >= 6:
-            n = max(len(tmp) // 4, 1)
+            n     = max(len(tmp)//4, 1)
             first = tmp[num].iloc[:n].mean()
             last  = tmp[num].iloc[-n:].mean()
             if pd.notna(first) and pd.notna(last) and first > 0:
-                chg = (last - first) / abs(first) * 100
+                chg = (last-first)/abs(first)*100
                 if chg < -15:
-                    actions.append(
-                        f"{idx}. 📉 **Urgent: {num} is down {abs(chg):.1f}%** from first quarter to latest. "
-                        "Pull a period comparison in Visualization to find exactly when it started declining. "
-                        "Cross-reference with any operational changes in that period."
-                    )
+                    actions.append(f"{idx}. 📉 **'{num}' is down {abs(chg):.1f}%** from earliest to latest records. "
+                                   "Use Visualization → Trend chart to pinpoint when the decline started.")
                 elif chg > 15:
-                    actions.append(
-                        f"{idx}. 🚀 **Capitalise on growth: {num} is up {chg:.1f}%**. "
-                        "Identify the specific driver — product mix, new segment, pricing change? "
-                        "Whatever is working, do more of it before competitors catch up."
-                    )
-                else:
-                    actions.append(
-                        f"{idx}. 📊 **{num} is stable ({chg:+.1f}% trend)**. "
-                        "Stability is safe but not growth. Run a segment breakdown to find which sub-groups "
-                        "are growing (exploit them) and which are declining (fix or exit)."
-                    )
+                    actions.append(f"{idx}. 🚀 **'{num}' is up {chg:.1f}%** — positive trend. "
+                                   "Identify what changed and sustain it.")
                 idx += 1
 
-    # 5. Underperforming segments
-    if num and cat:
-        agg = df.groupby(cat, dropna=False)[num].agg(["mean", "count"]).dropna()
-        overall_avg = agg["mean"].mean()
-        under = agg[agg["mean"] < overall_avg * 0.6].sort_values("mean")
-        if not under.empty:
-            names = ", ".join(f"'{g}'" for g in under.index[:3])
-            actions.append(
-                f"{idx}. 🔻 **Review weak segments: {names}** — performing at less than 60% of average {num}. "
-                "For each: (a) Is volume growing? If yes, invest. (b) Is it shrinking? Cut losses or restructure pricing."
-            )
-            idx += 1
-
-    # 6. Negative values
+    # 5. Outlier action
     if num:
-        s = pd.to_numeric(df[num], errors="coerce").dropna()
-        neg = s[s < 0]
-        if not neg.empty:
-            actions.append(
-                f"{idx}. 🔴 **Investigate {len(neg):,} negative {num} values** (total: {_fmt(neg.sum())}). "
-                "Are these refunds, chargebacks, adjustments, or data entry errors? "
-                "Each one is either a real loss or a data quality problem — both need attention."
-            )
-            idx += 1
-
-    # 7. Outlier / extreme values
-    if num:
-        s = pd.to_numeric(df[num], errors="coerce").dropna()
-        if len(s) >= 4:
+        s = _series(df, num)
+        if len(s) >= 8:
             q1, q3 = s.quantile(0.25), s.quantile(0.75)
             iqr = q3 - q1
             if iqr > 0:
-                extremes = s[s > q3 + 3 * iqr]
-                if not extremes.empty:
-                    actions.append(
-                        f"{idx}. ⚠️ **Verify {len(extremes):,} extreme {num} value(s)** "
-                        f"(up to {_fmt(extremes.max())}). "
-                        "Unusually large values could be legitimate windfalls or data entry errors. "
-                        "Confirm each one before including in forecasts."
-                    )
+                ext = s[s > q3 + 3*iqr]
+                if not ext.empty:
+                    actions.append(f"{idx}. ⚠️ **Verify {len(ext):,} extreme '{num}' value(s)** "
+                                   f"(up to {_fmt(ext.max())}). "
+                                   "Confirm these are real records, not data entry errors.")
                     idx += 1
 
-    # 8. Profitability if both rev and cost found
-    nums_all = df.select_dtypes(include="number").columns.tolist()
-    rev_col  = next((c for kw in ["revenue","sales","income","amount","total"] for c in nums_all if kw in c.lower()), None)
-    cost_col = next((c for kw in ["cost","expense","cogs","spend"] for c in nums_all if kw in c.lower() and c != rev_col), None)
-    if rev_col and cost_col:
-        rev_total  = pd.to_numeric(df[rev_col],  errors="coerce").dropna().sum()
-        cost_total = pd.to_numeric(df[cost_col], errors="coerce").dropna().sum()
-        if rev_total > 0:
-            margin = 100 * (rev_total - cost_total) / rev_total
-            if margin < 15:
-                actions.append(
-                    f"{idx}. 💰 **Margin alert: {margin:.1f}%** ({rev_col} vs {cost_col}). "
-                    "Below 15% leaves little buffer. Review your biggest cost line items and consider "
-                    "a price increase or cost renegotiation."
-                )
-                idx += 1
-            elif margin > 40:
-                actions.append(
-                    f"{idx}. 💡 **Strong margin: {margin:.1f}%** — you have pricing power. "
-                    "Consider whether reinvesting some margin into growth (marketing, capacity) "
-                    "could compound returns faster than protecting the current margin."
-                )
+    # 6. Correlation action if multiple numerics
+    if len(p.numeric_cols) >= 3:
+        good = [c for c in p.numeric_cols[:8] if _series(df,c).nunique() > 1]
+        if len(good) >= 2:
+            corr = df[good].corr(numeric_only=True)
+            best_pair = None
+            best_r    = 0
+            for i in range(len(good)):
+                for j in range(i+1, len(good)):
+                    v = abs(corr.iloc[i,j])
+                    if not math.isnan(v) and v > best_r:
+                        best_r = v
+                        best_pair = (good[i], good[j], corr.iloc[i,j])
+            if best_pair and best_r >= 0.6:
+                a, b, r = best_pair
+                direction = "positively" if r > 0 else "negatively"
+                actions.append(f"{idx}. 🔗 **'{a}' and '{b}' are {direction} correlated (r={r:.2f})**. "
+                               "Use this relationship — improving one likely affects the other.")
                 idx += 1
 
-    # Always end with a BI recommendation
-    actions.append(
-        f"{idx}. 📊 **Build a regular review cadence** — load updated data monthly, "
-        "run the Trend and Segment analysis, and compare vs prior period. "
-        "Consistent monitoring catches problems early and confirms what is working."
-    )
+    # Always end with monitoring
+    actions.append(f"{idx}. 📋 **Set a regular review cycle** — reload fresh data periodically, "
+                   "run Trend + Segment analysis, compare vs prior period. "
+                   "Consistent monitoring catches problems early.")
 
-    lines += actions
-    return lines
+    return lines + actions
 
 
-# ─── Keyword Router ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ROUTER
+# ═══════════════════════════════════════════════════════════════════════════════
 
 _ROUTES = [
-    (r"revenue|sales|income|performance|total|amount|value|earning",    "revenue"),
-    (r"trend|over time|growth|decline|month|quarter|year|period|time",  "trend"),
-    (r"profit|margin|cost|expense|cogs|loss|net",                       "profit"),
-    (r"segment|region|product|category|group|by|breakdown|split|who",   "segment"),
-    (r"grow|opportunit|potential|scale|expand|upsell|untap|gap",        "growth"),
-    (r"risk|danger|warning|alert|concentrat|vulnerab|fragile",          "risk"),
-    (r"price|pricing|rate|fee|charge|cheap|expensive|discount",         "pricing"),
-    (r"action|recommend|what should|next step|do now|help|advice|suggest|tell me what", "actions"),
+    (r"overview|summary|describe|what is|tell me about|show me",              "overview"),
+    (r"perform|revenue|sales|score|output|production|top|best|highest|worst", "performance"),
+    (r"trend|over time|growth|decline|month|quarter|year|period|time|when",   "trend"),
+    (r"segment|region|group|category|by|breakdown|split|compare|ward|class",  "segment"),
+    (r"opportunit|grow|potential|gap|improve|upside|leverage|untap|scale",    "opportunity"),
+    (r"anomal|outlier|error|quality|missing|duplicate|clean|check|verify",    "anomaly"),
+    (r"correlat|relation|link|connect|together|depend|affect|cause",          "correlation"),
+    (r"action|recommend|what.*do|next step|do now|advice|suggest|help|start", "actions"),
+    (r"risk|danger|warn|concentrat|vulnerab|fragile|exposure|problem",        "actions"),
+    (r"profit|margin|cost|expense|loss|net|break.?even",                      "performance"),
+    (r"price|pricing|rate|fee|charge|discount|tariff",                        "performance"),
 ]
 
 
@@ -751,30 +778,50 @@ def _route(query: str) -> str:
     for pattern, label in _ROUTES:
         if re.search(pattern, q):
             return label
-    return "actions"   # default: give actions
+    return "actions"
 
 
-# ─── Public API ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC API
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_insight(query: str, df: "pd.DataFrame | None" = None) -> str:
     if not query:
-        return "Ask a business question — e.g. 'what are my top revenue segments?' or 'what should I do now?'"
+        return "Ask a question about your data — e.g. 'show me trends' or 'what should I do now?'"
     if df is None or df.empty:
         return "No dataset loaded. Upload data on the Ingestion page first."
 
-    df = _coerce(df)
-    route = _route(query)
+    try:
+        df    = _coerce(df)
+        p     = DataProfile(df, query)
+        route = _route(query)
 
-    dispatch = {
-        "revenue":  lambda: _revenue_performance(df, query),
-        "trend":    lambda: _trend_intelligence(df, query),
-        "profit":   lambda: _profitability_analysis(df, query),
-        "segment":  lambda: _customer_segment_analysis(df, query),
-        "growth":   lambda: _growth_opportunity(df, query),
-        "risk":     lambda: _risk_flags(df, query),
-        "pricing":  lambda: _pricing_analysis(df, query),
-        "actions":  lambda: _action_summary(df, query),
-    }
+        dispatch = {
+            "overview":     lambda: _overview(p),
+            "performance":  lambda: _performance_analysis(p),
+            "trend":        lambda: _trend_analysis(p),
+            "segment":      lambda: _segment_analysis(p),
+            "opportunity":  lambda: _opportunity_analysis(p),
+            "anomaly":      lambda: _anomaly_analysis(p),
+            "correlation":  lambda: _correlation_analysis(p),
+            "actions":      lambda: _action_summary(p),
+        }
 
-    lines = dispatch.get(route, dispatch["actions"])()
-    return "\n".join(lines)
+        lines = dispatch.get(route, dispatch["actions"])()
+        return "\n".join(lines)
+
+    except Exception as e:
+        import traceback
+        return (f"Analysis error: {e}\n\n"
+                f"Dataset: {df.shape[0]} rows × {df.shape[1]} cols\n"
+                f"Columns: {', '.join(df.columns.tolist())}\n\n"
+                f"Please check your data has at least one numeric column.\n\n"
+                f"Details: {traceback.format_exc()}")
+
+
+# Keep these accessible for imports from other modules
+def _detect_dates(df): return DataProfile(df)._find_dates()
+def _best_num(df, query=""): return DataProfile(df, query).value_col
+def _best_cat(df, query=""): 
+    p = DataProfile(df, query)
+    return p.group_cols[0] if p.group_cols else None
