@@ -32,13 +32,22 @@ echo   URL  : http://127.0.0.1:10000
 echo   Stop : Close this window or Ctrl+C
 echo ====================================================
 echo.
-echo Waiting for server to start...
 
-REM Start Python app in this window
-REM Open browser only AFTER server confirms ready (via ping loop)
-start /b cmd /c "ping -n 8 127.0.0.1 >nul && start http://127.0.0.1:10000"
+REM Launch a helper that waits for server then opens browser
+REM Uses curl if available, falls back to pure ping delay
+start /b cmd /c "^
+setlocal & ^
+set /a tries=0 & ^
+:poll & ^
+set /a tries+=1 & ^
+curl -sf http://127.0.0.1:10000/ping >nul 2>&1 & ^
+if not errorlevel 1 (start http://127.0.0.1:10000 & exit) & ^
+if %tries% geq 30 (start http://127.0.0.1:10000 & exit) & ^
+ping -n 2 127.0.0.1 >nul & ^
+goto poll"
 
-python app.py
+REM Start the app — warnings suppressed
+python -W ignore app.py
 
 echo.
 echo Server stopped.

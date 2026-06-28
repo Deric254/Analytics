@@ -9,13 +9,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import plotly.io as pio
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
-)
+# reportlab imported lazily in report_to_pdf()
 
 
 def _fmt(v) -> str:
@@ -230,6 +224,14 @@ def report_to_html(report_data: dict) -> str:
 
 
 def report_to_pdf(report_data: dict) -> bytes:
+    # Lazy import — keeps startup fast
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    )
     buf    = io.BytesIO()
     doc    = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()

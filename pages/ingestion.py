@@ -8,7 +8,7 @@ import numpy as np
 import io
 import base64
 from urllib.parse import quote_plus, urlparse, parse_qs, unquote
-from sqlalchemy import create_engine, text
+# sqlalchemy imported lazily in DB callbacks
 
 dash.register_page(__name__, path="/ingestion", name="Data Ingestion")
 
@@ -214,6 +214,7 @@ def parse_contents(contents, filename):
 
 
 def _build_sql_engine(db_type, host, port, user, password, database, use_ssl=False):
+    from sqlalchemy import create_engine
     db_type = (db_type or "mysql").strip().lower()
     if db_type == "postgres":
         url = f"postgresql+psycopg2://{quote_plus(user or '')}:{quote_plus(password or '')}@{host}:{int(port)}/{database}{'?sslmode=require' if use_ssl else ''}"
@@ -225,6 +226,7 @@ def _build_sql_engine(db_type, host, port, user, password, database, use_ssl=Fal
 
 
 def _build_engine_from_connection_string(connection_string):
+    from sqlalchemy import create_engine
     conn = (connection_string or "").strip()
     if conn.startswith("postgresql://"):
         conn = conn.replace("postgresql://", "postgresql+psycopg2://", 1)
@@ -311,6 +313,7 @@ def update_output(contents, test_clicks, run_clicks, filename,
 
             if trigger == "test-db":
                 with engine.connect() as conn:
+                    from sqlalchemy import text
                     conn.execute(text("SELECT 1"))
                 return no_update, _success_msg("✓ Database connection successful"), no_update, no_update
 
