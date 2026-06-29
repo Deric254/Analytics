@@ -166,9 +166,10 @@ def auto_charts(shared_dataset):
         agg = tmp.groupby("_p")[num].sum().reset_index()
         agg.columns = ["Period", num]
         chg = _chg(agg[num].iloc[-1], agg[num].iloc[0]) if len(agg)>=2 else ""
+        agg = agg.dropna(subset=[num])
         fig = px.area(agg, x="Period", y=num, title=f"{num} over time  {chg}",
                       color_discrete_sequence=[BRAND])
-        fig.update_traces(line_width=2.5)
+        fig.update_traces(line_width=2.5, connectgaps=False)
         fig.update_layout(template="plotly_white",margin=dict(t=50,l=40,r=20,b=50),height=300)
         charts.append(_card(f"📈 {num} Trend",[dcc.Graph(figure=fig,config=CFG)]))
 
@@ -389,6 +390,27 @@ def build_custom(_, shared_dataset, chart_type, x, y, color, agg, fcol, fval):
             else:
                 df_agg = df.groupby(x,dropna=False)[y].agg(fn).reset_index()
             df = df_agg
+
+    # For line/area charts: sort by X and drop nulls to avoid broken lines
+    if chart_type in ("line", "area") and x and x in df.columns:
+        # Try numeric sort first, fall back to string sort
+        try:
+            df = df.copy()
+            df["__sort__"] = pd.to_datetime(df[x], errors="coerce")
+            if df["__sort__"].notna().mean() >= 0.6:
+                df = df.sort_values("__sort__").drop(columns=["__sort__"])
+            else:
+                df["__sort__"] = pd.to_numeric(df[x], errors="coerce")
+                if df["__sort__"].notna().mean() >= 0.5:
+                    df = df.sort_values("__sort__").drop(columns=["__sort__"])
+                else:
+                    df = df.sort_values(x).drop(columns=["__sort__"])
+        except Exception:
+            df = df.sort_values(x)
+        # Drop rows where any y column is null (avoids line breaks)
+        drop_cols = [c for c in y_list if c in df.columns]
+        if drop_cols:
+            df = df.dropna(subset=drop_cols)
 
     try:
         if chart_type == "bar":
