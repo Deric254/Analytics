@@ -55,28 +55,6 @@ layout = html.Div([
             ], style={"marginBottom": "16px"}),
 
             html.Div([
-                html.H4("Rename Columns", style={"fontSize": "13px", "fontWeight": "700", "color": "#374151", "marginBottom": "8px"}),
-                html.P("Select a column then type the new name. Add more pairs as needed.",
-                       style={"fontSize": "11px", "color": "#6b7280", "marginBottom": "8px"}),
-                html.Div(id="rename-pairs-container", children=[
-                    html.Div([
-                        dcc.Dropdown(id={"type": "rename-col", "index": 0},
-                                     placeholder="Column to rename",
-                                     style={"flex": "1", "marginRight": "6px"}),
-                        dcc.Input(id={"type": "rename-new", "index": 0},
-                                  type="text", placeholder="New name",
-                                  style={"flex": "1", "padding": "6px 8px", "borderRadius": "6px",
-                                         "border": "1px solid #d1d5db", "fontSize": "13px"}),
-                    ], style={"display": "flex", "marginBottom": "6px"}),
-                ]),
-                html.Button("+ Add another rename", id="rename-add-btn", n_clicks=0,
-                            style={"fontSize": "12px", "color": "#3e8865", "background": "none",
-                                   "border": "none", "cursor": "pointer", "padding": "0",
-                                   "fontWeight": "600", "marginTop": "4px"}),
-                dcc.Store(id="rename-count", data=1),
-            ], style={"marginBottom": "16px"}),
-
-            html.Div([
                 html.H4("Drop Columns", style={"fontSize": "13px", "fontWeight": "700", "color": "#374151", "marginBottom": "8px"}),
                 dcc.Dropdown(id="drop-columns", multi=True, placeholder="Select columns to drop"),
             ], style={"marginBottom": "16px"}),
@@ -101,6 +79,50 @@ layout = html.Div([
                           style={"width": "100%", "padding": "7px", "borderRadius": "6px", "border": "1px solid #d1d5db"}),
             ], style={"marginBottom": "20px"}),
 
+
+            html.Div([
+                html.H4("Rename Columns", style={"fontSize":"13px","fontWeight":"700","color":"#374151","marginBottom":"8px"}),
+                html.Div(id="rename-pairs-container", children=[
+                    html.Div([
+                        dcc.Dropdown(id={"type":"rename-col","index":0}, placeholder="Column to rename",
+                                     style={"flex":"1","marginRight":"6px"}),
+                        dcc.Input(id={"type":"rename-new","index":0}, type="text", placeholder="New name",
+                                  style={"flex":"1","padding":"6px 8px","borderRadius":"6px",
+                                         "border":"1px solid #d1d5db","fontSize":"13px"}),
+                    ], style={"display":"flex","marginBottom":"6px"}),
+                ]),
+                html.Div([
+                    html.Button("+ Add pair", id="rename-add-btn", n_clicks=0,
+                                style={"fontSize":"12px","color":"#3e8865","background":"none",
+                                       "border":"none","cursor":"pointer","padding":"0","fontWeight":"600"}),
+                ]),
+                dcc.Store(id="rename-count", data=1),
+            ], style={"marginBottom":"16px"}),
+
+            html.Div([
+                html.H4("Trim & Standardise Text", style={"fontSize":"13px","fontWeight":"700","color":"#374151","marginBottom":"8px"}),
+                dcc.Dropdown(id="text-clean-columns", multi=True, placeholder="Columns (default: all text)"),
+                dcc.Checklist(id="text-clean-ops", options=[
+                    {"label":" Trim whitespace",       "value":"trim"},
+                    {"label":" Uppercase",              "value":"upper"},
+                    {"label":" Lowercase",              "value":"lower"},
+                    {"label":" Title case",             "value":"title"},
+                ], value=["trim"],
+                labelStyle={"display":"block","fontSize":"13px","marginBottom":"3px"},
+                style={"marginTop":"8px"}),
+            ], style={"marginBottom":"16px"}),
+
+            html.Div([
+                html.H4("Replace Values", style={"fontSize":"13px","fontWeight":"700","color":"#374151","marginBottom":"8px"}),
+                html.P("Comma-separated values to treat as missing (e.g. N/A, -, unknown, 0)",
+                       style={"fontSize":"11px","color":"#6b7280","margin":"0 0 6px"}),
+                dcc.Input(id="replace-find", type="text", placeholder="e.g.  N/A, -, unknown",
+                          style={"width":"100%","padding":"7px","borderRadius":"6px",
+                                 "border":"1px solid #d1d5db","marginBottom":"6px","fontSize":"13px"}),
+                dcc.Input(id="replace-with", type="text", placeholder="Replace with (blank = NaN)",
+                          style={"width":"100%","padding":"7px","borderRadius":"6px",
+                                 "border":"1px solid #d1d5db","fontSize":"13px"}),
+            ], style={"marginBottom":"20px"}),
             html.Div([
                 html.Button("✅ Apply Cleaning", id="apply-cleaning", n_clicks=0, style={
                     "padding": "9px 20px", "borderRadius": "6px", "border": "none",
@@ -194,39 +216,29 @@ def cache_raw(shared_dataset, existing_raw):
     Input("rename-add-btn", "n_clicks"),
     Input("shared-dataset", "data"),
     State("rename-count", "data"),
-    State("rename-pairs-container", "children"),
     prevent_initial_call=True,
 )
-def manage_rename_pairs(add_clicks, shared_dataset, count, existing_children):
+def manage_rename_pairs(_, shared_dataset, count):
     triggered = ctx.triggered_id
-
-    # Get column options
     opts = []
     if shared_dataset and shared_dataset.get("records"):
-        df = pd.DataFrame(shared_dataset["records"])
-        opts = [{"label": c, "value": c} for c in df.columns]
+        df_tmp = pd.DataFrame(shared_dataset["records"])
+        opts = [{"label": c, "value": c} for c in df_tmp.columns]
 
-    # Rebuild existing pairs with updated options
-    def make_pair(index):
+    new_count = count + 1 if triggered == "rename-add-btn" else count
+
+    def make_pair(i):
         return html.Div([
-            dcc.Dropdown(id={"type": "rename-col", "index": index},
-                         options=opts,
+            dcc.Dropdown(id={"type":"rename-col","index":i}, options=opts,
                          placeholder="Column to rename",
-                         style={"flex": "1", "marginRight": "6px"}),
-            dcc.Input(id={"type": "rename-new", "index": index},
-                      type="text", placeholder="New name",
-                      style={"flex": "1", "padding": "6px 8px", "borderRadius": "6px",
-                             "border": "1px solid #d1d5db", "fontSize": "13px"}),
-        ], style={"display": "flex", "marginBottom": "6px"})
+                         style={"flex":"1","marginRight":"6px"}),
+            dcc.Input(id={"type":"rename-new","index":i}, type="text",
+                      placeholder="New name",
+                      style={"flex":"1","padding":"6px 8px","borderRadius":"6px",
+                             "border":"1px solid #d1d5db","fontSize":"13px"}),
+        ], style={"display":"flex","marginBottom":"6px"})
 
-    if triggered == "rename-add-btn":
-        new_count = count + 1
-        children = [make_pair(i) for i in range(new_count)]
-        return children, new_count
-
-    # Data loaded — refresh options on existing pairs
-    children = [make_pair(i) for i in range(count)]
-    return children, count
+    return [make_pair(i) for i in range(new_count)], new_count
 
 
 @dash.callback(
@@ -235,14 +247,16 @@ def manage_rename_pairs(add_clicks, shared_dataset, count, existing_children):
     Output("type-convert-columns", "options"),
     Output("drop-columns", "options"),
     Output("outlier-columns", "options"),
+    Output("text-clean-columns", "options"),
     Input("shared-dataset", "data"),
 )
 def update_col_options(shared_dataset):
     if not shared_dataset or not shared_dataset.get("records"):
-        return [], [], [], [], []
+        return [], [], [], [], [], []
     df = pd.DataFrame(shared_dataset["records"])
     opts = [{"label": c, "value": c} for c in df.columns]
-    return opts, opts, opts, opts, opts
+    text_opts = [{"label": c, "value": c} for c in df.select_dtypes(include="object").columns]
+    return opts, opts, opts, opts, opts, text_opts
 
 
 @dash.callback(
@@ -262,8 +276,12 @@ def update_col_options(shared_dataset):
     State("outlier-columns", "value"),
     State("outlier-threshold", "value"),
     State("row-filter-query", "value"),
-    State({"type": "rename-col", "index": dash.ALL}, "value"),
-    State({"type": "rename-new", "index": dash.ALL}, "value"),
+    State({"type":"rename-col","index":ALL}, "value"),
+    State({"type":"rename-new","index":ALL}, "value"),
+    State("text-clean-columns", "value"),
+    State("text-clean-ops", "value"),
+    State("replace-find", "value"),
+    State("replace-with", "value"),
     State("shared-dataset", "data"),
     State("cleaning-raw-dataset", "data"),
     prevent_initial_call=True,
@@ -272,7 +290,8 @@ def clean_data(apply_clicks, rollback_clicks,
                missing_strategy, missing_columns, duplicate_scope, duplicate_subset_columns,
                type_convert_columns, type_convert_target, drop_columns,
                outlier_mode, outlier_columns, threshold, row_filter_query,
-               rename_cols, rename_news,
+               rename_cols, rename_news, text_clean_cols, text_clean_ops,
+               replace_find, replace_with,
                shared_dataset, raw_dataset):
 
     active = shared_dataset if shared_dataset and shared_dataset.get("records") else raw_dataset
@@ -296,14 +315,43 @@ def clean_data(apply_clicks, rollback_clicks,
 
     # Rename columns
     if rename_cols and rename_news:
-        rename_map = {}
-        for old_name, new_name in zip(rename_cols, rename_news):
-            if old_name and new_name and new_name.strip() and old_name in df.columns:
-                rename_map[old_name] = new_name.strip()
+        rename_map = {o: n.strip() for o, n in zip(rename_cols, rename_news)
+                      if o and n and n.strip() and o in df.columns and n.strip() != o}
         if rename_map:
             df = df.rename(columns=rename_map)
             msgs.append(f"Renamed {len(rename_map)} column(s): " +
                         ", ".join(f"{o}→{n}" for o, n in rename_map.items()))
+
+    # Trim & standardise text
+    if text_clean_ops:
+        text_targets = [c for c in (text_clean_cols or [])
+                        if c in df.columns and df[c].dtype == object]
+        if not text_clean_cols:
+            text_targets = df.select_dtypes(include="object").columns.tolist()
+        for col in text_targets:
+            if "trim"  in text_clean_ops: df[col] = df[col].astype(str).str.strip().where(df[col].notna())
+            if "upper" in text_clean_ops: df[col] = df[col].astype(str).str.upper().where(df[col].notna())
+            if "lower" in text_clean_ops: df[col] = df[col].astype(str).str.lower().where(df[col].notna())
+            if "title" in text_clean_ops: df[col] = df[col].astype(str).str.title().where(df[col].notna())
+        if text_targets:
+            ops_done = ", ".join(text_clean_ops or [])
+            msgs.append(f"Text cleaned ({ops_done}) on {len(text_targets)} column(s)")
+
+    # Replace values
+    if replace_find:
+        find_vals = [v.strip() for v in replace_find.split(",") if v.strip()]
+        with_val  = replace_with.strip() if replace_with and replace_with.strip() else None
+        if find_vals:
+            replaced = 0
+            for col in df.columns:
+                mask = df[col].astype(str).isin(find_vals)
+                if mask.any():
+                    df.loc[mask, col] = with_val
+                    replaced += int(mask.sum())
+            if replaced:
+                msgs.append(f"Replaced {replaced:,} value(s): {', '.join(find_vals)} → "
+                            f"{'NaN' if with_val is None else repr(with_val)}")
+
 
     # Type conversion first (affects what follows)
     if type_convert_columns:

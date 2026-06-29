@@ -93,87 +93,204 @@ def build_report_data(df: pd.DataFrame, source_name: str = "dataset") -> dict:
 
 
 def _auto_findings(df, p, source_name) -> list[str]:
-    """Generate 4-6 plain-English findings from any dataset."""
-    from services.insights_agent import _series, _fmt, _pct, _chg
+    """
+    Generate intelligence-led findings from any dataset.
+    Every finding answers: what does this mean and what should be done?
+    """
+    from services.insights_agent import _series, _fmt, _pct
     findings = []
-    num = p.value_col
-    cat = p.group_cols[0] if p.group_cols else None
-    rows, cols = df.shape
+    num  = p.value_col
+    cat  = p.group_cols[0] if p.group_cols else None
+    cat2 = p.group_cols[1] if len(p.group_cols) > 1 else None
+    rows, cols_n = df.shape
     missing = int(df.isna().sum().sum())
     dups    = int(df.duplicated().sum())
+    total_c = rows * cols_n
 
-    # 1. Size & quality
-    complete = 100*(rows*cols-missing)/(rows*cols) if rows*cols else 100
-    qual = "complete" if not missing else f"{complete:.1f}% complete ({missing:,} gaps)"
-    findings.append(
-        f"The dataset contains {rows:,} records across {cols} columns "
-        f"({p.numeric_cols.__len__()} numeric, {p.cat_cols.__len__()} categorical). "
-        f"Data quality: {qual}."
-        + (f" {dups:,} duplicate rows detected." if dups else "")
-    )
-
-    # 2. Key metric summary
-    if num:
-        s = _series(df, num)
-        cv = s.std()/s.mean() if s.mean() else 0
-        spread = ("highly variable" if cv > 0.5 else
-                  "moderately variable" if cv > 0.2 else "consistent")
+    # ── 1. Data integrity ─────────────────────────────────────────────────────
+    if missing == 0 and dups == 0:
         findings.append(
-            f"The primary metric '{num}' totals {_fmt(s.sum())} with an average of {_fmt(s.mean())} "
-            f"and median of {_fmt(s.median())}. "
-            f"Values are {spread} (CV={cv:.2f}), ranging from {_fmt(s.min())} to {_fmt(s.max())}."
+            f"✅ Data integrity: {rows:,} records, fully complete — no missing values or duplicates. "
+            "Analysis results are reliable."
         )
+    else:
+        parts = []
+        if missing:
+            pct  = 100 * missing / total_c
+            worst = df.isna().sum().idxmax()
+            parts.append(
+                f"{missing:,} missing values ({pct:.1f}%) — worst in '{worst}' "
+                f"({int(df[worst].isna().sum()):,} gaps). "
+                "Fill or remove before drawing conclusions from this column."
+            )
+        if dups:
+            parts.append(
+                f"{dups:,} duplicate rows ({_pct(dups, rows)}) inflate totals. "
+                "Remove duplicates on the Cleaning page."
+            )
+        findings.append("⚠️ Data quality issues: " + " | ".join(parts))
 
-    # 3. Top performer
-    if num and cat:
-        agg   = df.groupby(cat,dropna=False)[num].sum().sort_values(ascending=False).dropna()
-        grand = agg.sum()
-        if grand > 0 and len(agg) >= 2:
-            top1 = agg.iloc[0]
-            share = 100*top1/grand
-            findings.append(
-                f"Top performer: '{agg.index[0]}' in '{cat}' accounts for "
-                f"{_fmt(top1)} ({share:.1f}% of total {num})."
-                + (" This represents significant concentration." if share >= 40 else "")
+    # ── 2. Primary metric intelligence ───────────────────────────────────────
+    if num:
+        s  = _series(df, num)
+        if not s.empty:
+            total  = s.sum()
+            mean   = s.mean()
+            median = s.median()
+            cv     = s.std() / mean if mean else 0
+
+            if mean > median * 1.25:
+                spread_note = (
+                    f"Mean ({_fmt(mean)}) is significantly above median ({_fmt(median)}) — "
+                    "a small number of high-value records drive the average up. "
+                    "Focus retention on your top performers."
+                )
+            elif median > mean * 1.25:
+                spread_note = (
+                    f"Median ({_fmt(median)}) exceeds mean ({_fmt(mean)}) — "
+                    "a few very low values drag the average down. "
+                    "Review and address your lowest-performing records."
+                )
+            elif cv > 0.5:
+                spread_note = (
+                    f"High variability (CV={cv:.2f}) — performance is inconsistent. "
+                    "Standardise processes to reduce this gap."
+                )
+            else:
+                spread_note = f"Performance is consistent (CV={cv:.2f})."
+
+            # 80/20 check
+            top20 = s.nlargest(max(1, len(s) // 5))
+            top20_share = top20.sum() / total if total else 0
+            pareto_note = (
+                f" Top 20% of records generate {_pct(top20.sum(), total)} of total {num} — "
+                "protect these disproportionately."
+                if top20_share >= 0.65 else ""
             )
 
-    # 4. Trend
+            findings.append(
+                f"📊 {num}: total {_fmt(total)}, average {_fmt(mean)}. "
+                f"{spread_note}{pareto_note}"
+            )
+
+    # ── 3. Segment concentration & action ────────────────────────────────────
+    if num and cat:
+        agg   = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).dropna()
+        grand = agg.sum()
+        if grand > 0 and len(agg) >= 2:
+            top_name  = agg.index[0]
+            top_val   = agg.iloc[0]
+            top_share = 100 * top_val / grand
+            bot_name  = agg.index[-1]
+            bot_val   = agg.iloc[-1]
+
+            if top_share >= 40:
+                action = (
+                    f"🚨 Concentration risk: '{top_name}' drives {top_share:.0f}% of {num}. "
+                    "Heavy dependence on one segment is a business risk. "
+                    f"Invest in growing '{agg.index[1]}' (currently {_pct(agg.iloc[1], grand)}) "
+                    "to reduce exposure."
+                )
+            else:
+                gap = top_val - agg.iloc[1]
+                action = (
+                    f"🏆 '{top_name}' leads with {_pct(top_val, grand)} of {num}. "
+                    f"Gap to second place ('{agg.index[1]}'): {_fmt(gap)}. "
+                    "Identify what makes the top performer work and replicate it."
+                )
+            findings.append(action)
+
+            # Bottom performer
+            if len(agg) >= 3:
+                bot_share = 100 * bot_val / grand
+                findings.append(
+                    f"🔻 Lowest: '{bot_name}' contributes only {_pct(bot_val, grand)} of {num}. "
+                    + ("Consider exit, restructure, or targeted investment to understand the gap."
+                       if bot_share < 5 else "Monitor — below-average but not critical yet.")
+                )
+
+    # ── 4. Trend with momentum and recommendation ─────────────────────────────
     if num and p.date_cols:
         dc  = p.date_cols[0]
         tmp = df.copy()
-        tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce")
-        tmp[num] = pd.to_numeric(tmp[num], errors="coerce")
-        tmp = tmp.dropna(subset=[dc,num]).sort_values(dc)
-        if len(tmp) >= 6:
-            n     = max(len(tmp)//4, 1)
-            first = tmp[num].iloc[:n].mean()
-            last  = tmp[num].iloc[-n:].mean()
+        tmp[dc] = pd.to_numeric(pd.to_datetime(tmp[dc], errors="coerce"), errors="coerce")
+        tmp2 = df.copy()
+        tmp2[dc] = pd.to_datetime(tmp2[dc], errors="coerce")
+        tmp2[num] = pd.to_numeric(tmp2[num], errors="coerce")
+        tmp2 = tmp2.dropna(subset=[dc, num]).sort_values(dc)
+
+        if len(tmp2) >= 6:
+            n     = max(len(tmp2) // 4, 1)
+            first = tmp2[num].iloc[:n].mean()
+            last  = tmp2[num].iloc[-n:].mean()
+            prev  = tmp2[num].iloc[-(2*n):-n].mean() if len(tmp2) >= 3*n else first
+
             if pd.notna(first) and pd.notna(last) and first != 0:
-                chg  = (last-first)/abs(first)*100
-                word = "increased" if chg > 0 else "decreased"
+                overall_chg = (last - first) / abs(first) * 100
+                recent_chg  = (last - prev) / abs(prev) * 100 if pd.notna(prev) and prev != 0 else 0
+
+                if overall_chg < -20:
+                    rec = "Urgent investigation needed — compare winning vs losing periods to find the root cause."
+                elif overall_chg < 0:
+                    rec = "Declining trend — review what changed and whether it is structural or temporary."
+                elif overall_chg > 20:
+                    rec = "Strong growth — identify the driver and protect it. Avoid assuming it continues automatically."
+                else:
+                    rec = "Stable. Run a segment breakdown to find which sub-groups are growing vs declining."
+
+                momentum = ""
+                if abs(recent_chg) > 10:
+                    momentum = (
+                        f" Recent momentum: {recent_chg:+.1f}% in the latest quarter. "
+                        + ("Accelerating — capitalise now." if recent_chg > 0 else "Decelerating — address immediately.")
+                    )
+
                 findings.append(
-                    f"Trend: '{num}' has {word} by {abs(chg):.1f}% "
-                    f"from the earliest to the most recent records."
+                    f"📈 Trend: {num} moved {overall_chg:+.1f}% from earliest to latest records. "
+                    f"{rec}{momentum}"
                 )
 
-    # 5. Correlations
+    # ── 5. Cross-segment opportunity ─────────────────────────────────────────
+    if num and cat and cat2:
+        pivot = df.groupby([cat, cat2], dropna=False)[num].sum().unstack(fill_value=0)
+        best_combo = None
+        best_val   = 0
+        for c in pivot.index:
+            for c2 in pivot.columns:
+                v = pivot.loc[c, c2]
+                if v > best_val:
+                    best_val = v
+                    best_combo = (c, c2)
+        if best_combo:
+            grand_total = df[num].sum() if num else 0
+            findings.append(
+                f"💡 Best combination: '{best_combo[0]}' × '{best_combo[1]}' "
+                f"= {_fmt(best_val)} ({_pct(best_val, grand_total)} of total). "
+                "This cross-segment generates disproportionate value — prioritise it."
+            )
+
+    # ── 6. Correlation → actionable relationship ──────────────────────────────
     good_nums = [c for c in p.numeric_cols[:8]
-                 if not (_series(df,c).is_monotonic_increasing and _series(df,c).nunique()==rows)]
+                 if _series(df, c).std() > 0
+                 and not (_series(df,c).is_monotonic_increasing and _series(df,c).nunique()==rows)]
     if len(good_nums) >= 2:
-        corr = df[good_nums].corr(numeric_only=True)
+        corr     = df[good_nums].corr(numeric_only=True)
         best_r, best_pair = 0, None
         for i in range(len(good_nums)):
-            for j in range(i+1,len(good_nums)):
-                v = abs(corr.iloc[i,j])
+            for j in range(i+1, len(good_nums)):
+                v = abs(corr.iloc[i, j])
                 if not np.isnan(v) and v > best_r:
-                    best_r = v
-                    best_pair = (good_nums[i],good_nums[j],corr.iloc[i,j])
+                    best_r     = v
+                    best_pair  = (good_nums[i], good_nums[j], corr.iloc[i, j])
         if best_pair and best_r >= 0.5:
-            a,b,r = best_pair
-            direction = "positively" if r > 0 else "negatively"
+            a, b, r = best_pair
+            direction = "increases" if r > 0 else "decreases"
+            strength  = "strongly" if best_r >= 0.8 else "moderately"
             findings.append(
-                f"Notable correlation: '{a}' and '{b}' are {direction} correlated (r={r:.2f}), "
-                "suggesting these variables tend to move together."
+                f"🔗 When '{a}' rises, '{b}' {strength} {direction} (r={r:.2f}). "
+                + ("Use this lever — improving one drives the other."
+                   if r > 0 else
+                   "Trade-off detected — improving one may reduce the other. Balance carefully.")
             )
 
     return findings

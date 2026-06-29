@@ -76,7 +76,7 @@ layout = html.Div([
                 ], style={"flex":"1","minWidth":"120px"}),
                 html.Div([
                     html.Label("Y axis", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
-                    dcc.Dropdown(id="viz-y", placeholder="Y column"),
+                    dcc.Dropdown(id="viz-y", placeholder="Y column(s)", multi=True),
                 ], style={"flex":"1","minWidth":"120px"}),
                 html.Div([
                     html.Label("Color / Group", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
@@ -362,9 +362,16 @@ def build_custom(_, shared_dataset, chart_type, x, y, color, agg, fcol, fval):
     if df.empty:
         return {"data":[],"layout":{"title":"No rows after filter"}}
 
-    # Fallback to DataProfile defaults
-    x = x or (p.group_cols[0] if p.group_cols else df.columns[0])
-    y = y or p.value_col or p.numeric_cols[0] if p.numeric_cols else None
+    # y is now a list (multi=True)
+    y_list = [y] if isinstance(y, str) else (y or [])
+    y_list = [c for c in y_list if c and c in df.columns]
+    if not y_list:
+        y_list = [p.value_col] if p.value_col else (p.numeric_cols[:1] if p.numeric_cols else [])
+    if not y_list:
+        return {"data":[],"layout":{"title":"Select at least one Y axis column"}}
+
+    y      = y_list[0]   # primary for single-series charts
+    x      = x or (p.group_cols[0] if p.group_cols else df.columns[0])
     color_use = color if color and color in df.columns else None
 
     if not y:
@@ -385,17 +392,32 @@ def build_custom(_, shared_dataset, chart_type, x, y, color, agg, fcol, fval):
 
     try:
         if chart_type == "bar":
-            fig = px.bar(df.head(40),x=x,y=y,color=color_use,
-                         title=f"{y} by {x}",text_auto=True,
-                         color_discrete_sequence=px.colors.qualitative.Safe)
+            if len(y_list) > 1:
+                fig = px.bar(df.head(40), x=x, y=y_list, barmode="group",
+                             title=" & ".join(y_list) + f" by {x}",
+                             color_discrete_sequence=px.colors.qualitative.Safe)
+            else:
+                fig = px.bar(df.head(40),x=x,y=y,color=color_use,
+                             title=f"{y} by {x}",text_auto=True,
+                             color_discrete_sequence=px.colors.qualitative.Safe)
         elif chart_type == "line":
-            fig = px.line(df,x=x,y=y,color=color_use,
-                          title=f"{y} over {x}",markers=True,
-                          color_discrete_sequence=[BRAND])
+            if len(y_list) > 1:
+                fig = px.line(df, x=x, y=y_list, markers=True,
+                              title=" & ".join(y_list) + f" over {x}",
+                              color_discrete_sequence=px.colors.qualitative.Safe)
+            else:
+                fig = px.line(df,x=x,y=y,color=color_use,
+                              title=f"{y} over {x}",markers=True,
+                              color_discrete_sequence=[BRAND])
         elif chart_type == "area":
-            fig = px.area(df,x=x,y=y,color=color_use,
-                          title=f"{y} over {x}",
-                          color_discrete_sequence=[BRAND])
+            if len(y_list) > 1:
+                fig = px.area(df, x=x, y=y_list,
+                              title=" & ".join(y_list) + f" over {x}",
+                              color_discrete_sequence=px.colors.qualitative.Safe)
+            else:
+                fig = px.area(df,x=x,y=y,color=color_use,
+                              title=f"{y} over {x}",
+                              color_discrete_sequence=[BRAND])
         elif chart_type == "scatter":
             fig = px.scatter(df,x=x,y=y,color=color_use,
                              title=f"{y} vs {x}",
