@@ -2,7 +2,7 @@
 Cleaning page — only fires on explicit Apply click. Clean UI with results summary.
 """
 import dash
-from dash import html, dcc, dash_table, Input, Output, State, no_update, ctx
+from dash import html, dcc, dash_table, Input, Output, State, no_update, ctx, ALL
 import pandas as pd
 from services.export_utils import dataframe_to_excel_bytes
 
@@ -52,6 +52,28 @@ layout = html.Div([
                     {"label": "To datetime", "value": "datetime"},
                     {"label": "To category", "value": "category"},
                 ], value="numeric", clearable=False, style={"marginTop": "6px"}),
+            ], style={"marginBottom": "16px"}),
+
+            html.Div([
+                html.H4("Rename Columns", style={"fontSize": "13px", "fontWeight": "700", "color": "#374151", "marginBottom": "8px"}),
+                html.P("Select a column then type the new name. Add more pairs as needed.",
+                       style={"fontSize": "11px", "color": "#6b7280", "marginBottom": "8px"}),
+                html.Div(id="rename-pairs-container", children=[
+                    html.Div([
+                        dcc.Dropdown(id={"type": "rename-col", "index": 0},
+                                     placeholder="Column to rename",
+                                     style={"flex": "1", "marginRight": "6px"}),
+                        dcc.Input(id={"type": "rename-new", "index": 0},
+                                  type="text", placeholder="New name",
+                                  style={"flex": "1", "padding": "6px 8px", "borderRadius": "6px",
+                                         "border": "1px solid #d1d5db", "fontSize": "13px"}),
+                    ], style={"display": "flex", "marginBottom": "6px"}),
+                ]),
+                html.Button("+ Add another rename", id="rename-add-btn", n_clicks=0,
+                            style={"fontSize": "12px", "color": "#3e8865", "background": "none",
+                                   "border": "none", "cursor": "pointer", "padding": "0",
+                                   "fontWeight": "600", "marginTop": "4px"}),
+                dcc.Store(id="rename-count", data=1),
             ], style={"marginBottom": "16px"}),
 
             html.Div([
@@ -165,6 +187,48 @@ def cache_raw(shared_dataset, existing_raw):
     return {"filename": shared_dataset.get("filename", "dataset"), "records": shared_dataset["records"]}
 
 
+
+@dash.callback(
+    Output("rename-pairs-container", "children"),
+    Output("rename-count", "data"),
+    Input("rename-add-btn", "n_clicks"),
+    Input("shared-dataset", "data"),
+    State("rename-count", "data"),
+    State("rename-pairs-container", "children"),
+    prevent_initial_call=True,
+)
+def manage_rename_pairs(add_clicks, shared_dataset, count, existing_children):
+    triggered = ctx.triggered_id
+
+    # Get column options
+    opts = []
+    if shared_dataset and shared_dataset.get("records"):
+        df = pd.DataFrame(shared_dataset["records"])
+        opts = [{"label": c, "value": c} for c in df.columns]
+
+    # Rebuild existing pairs with updated options
+    def make_pair(index):
+        return html.Div([
+            dcc.Dropdown(id={"type": "rename-col", "index": index},
+                         options=opts,
+                         placeholder="Column to rename",
+                         style={"flex": "1", "marginRight": "6px"}),
+            dcc.Input(id={"type": "rename-new", "index": index},
+                      type="text", placeholder="New name",
+                      style={"flex": "1", "padding": "6px 8px", "borderRadius": "6px",
+                             "border": "1px solid #d1d5db", "fontSize": "13px"}),
+        ], style={"display": "flex", "marginBottom": "6px"})
+
+    if triggered == "rename-add-btn":
+        new_count = count + 1
+        children = [make_pair(i) for i in range(new_count)]
+        return children, new_count
+
+    # Data loaded — refresh options on existing pairs
+    children = [make_pair(i) for i in range(count)]
+    return children, count
+
+
 @dash.callback(
     Output("missing-columns", "options"),
     Output("duplicate-subset-columns", "options"),
@@ -198,6 +262,8 @@ def update_col_options(shared_dataset):
     State("outlier-columns", "value"),
     State("outlier-threshold", "value"),
     State("row-filter-query", "value"),
+    State({"type": "rename-col", "index": dash.ALL}, "value"),
+    State({"type": "rename-new", "index": dash.ALL}, "value"),
     State("shared-dataset", "data"),
     State("cleaning-raw-dataset", "data"),
     prevent_initial_call=True,
@@ -206,6 +272,7 @@ def clean_data(apply_clicks, rollback_clicks,
                missing_strategy, missing_columns, duplicate_scope, duplicate_subset_columns,
                type_convert_columns, type_convert_target, drop_columns,
                outlier_mode, outlier_columns, threshold, row_filter_query,
+               rename_cols, rename_news,
                shared_dataset, raw_dataset):
 
     active = shared_dataset if shared_dataset and shared_dataset.get("records") else raw_dataset
@@ -226,6 +293,17 @@ def clean_data(apply_clicks, rollback_clicks,
     df = pd.DataFrame(active["records"]).copy()
     before = len(df)
     msgs = []
+
+    # Rename columns
+    if rename_cols and rename_news:
+        rename_map = {}
+        for old_name, new_name in zip(rename_cols, rename_news):
+            if old_name and new_name and new_name.strip() and old_name in df.columns:
+                rename_map[old_name] = new_name.strip()
+        if rename_map:
+            df = df.rename(columns=rename_map)
+            msgs.append(f"Renamed {len(rename_map)} column(s): " +
+                        ", ".join(f"{o}→{n}" for o, n in rename_map.items()))
 
     # Type conversion first (affects what follows)
     if type_convert_columns:
