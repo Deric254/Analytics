@@ -294,6 +294,34 @@ def _auto_findings(df, p, source_name) -> list[str]:
     return findings
 
 
+def _make_page_decorator(brand_name="DericBI"):
+    """Returns a canvas callback that draws a slim brand header rule and a
+    footer with page numbers — applied to every page, keeps the report
+    looking branded without adding bulky logo images that bloat file size.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    brand_green = colors.HexColor("#3e8865")
+    light_grey  = colors.HexColor("#9ca3af")
+
+    def _draw(canvas, doc):
+        canvas.saveState()
+        w, h = doc.pagesize
+        # top accent rule
+        canvas.setStrokeColor(brand_green)
+        canvas.setLineWidth(2)
+        canvas.line(doc.leftMargin, h - 0.32*inch, w - doc.rightMargin, h - 0.32*inch)
+        # footer: brand left, page number right
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(light_grey)
+        canvas.drawString(doc.leftMargin, 0.3*inch, brand_name)
+        canvas.drawRightString(w - doc.rightMargin, 0.3*inch, f"Page {doc.page}")
+        canvas.restoreState()
+
+    return _draw
+
+
 def report_to_pdf(report_data: dict) -> bytes:
     """
     Business-oriented PDF report. Executive findings are the centerpiece —
@@ -411,7 +439,8 @@ def report_to_pdf(report_data: dict) -> bytes:
     add_df_table("Categorical Column Statistics", report_data.get("categorical_summary"))
     add_df_table("Sample Records",                report_data.get("sample_rows"))
 
-    doc.build(story)
+    decorator = _make_page_decorator()
+    doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     return buf.getvalue()
 
 
@@ -424,48 +453,50 @@ def df_to_excel(df: pd.DataFrame) -> bytes:
 
 def figures_to_pdf(figures: list, title: str = "DericBI Charts") -> bytes:
     """
-    Render a list of Plotly figure JSON strings to a single PDF.
-    One chart per page, image sized to fill the page with minimal margin.
+    Render a list of Plotly figure JSON strings to a single branded PDF.
+    Two charts per page (kept reasonably sized, not blown up) to keep file
+    size sane even with a large gallery.
     """
     import plotly.io as pio
     from reportlab.lib.pagesizes import landscape, A4
     from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Image, Spacer, Paragraph
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Image, Spacer, PageBreak
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=landscape(A4),
-        leftMargin=0.3*inch, rightMargin=0.3*inch,
-        topMargin=0.3*inch, bottomMargin=0.3*inch,
+        leftMargin=0.4*inch, rightMargin=0.4*inch,
+        topMargin=0.45*inch, bottomMargin=0.45*inch,
     )
-    styles = getSampleStyleSheet()
     story = []
 
     page_w, page_h = landscape(A4)
-    avail_w = page_w - 0.6*inch
-    avail_h = page_h - 0.7*inch
+    avail_w   = page_w - 0.8*inch
+    per_chart_h = (page_h - 1.0*inch) / 2 - 0.15*inch  # two charts stacked per page
 
     for i, fig_json in enumerate(figures):
         fig = pio.from_json(fig_json) if isinstance(fig_json, str) else fig_json
-        # Tight layout — no extra whitespace inside the chart itself
         fig.update_layout(
-            margin=dict(l=40, r=20, t=50, b=40),
+            margin=dict(l=40, r=20, t=44, b=36),
             paper_bgcolor="white",
             plot_bgcolor="white",
         )
-        img_bytes = pio.to_image(fig, format="png", width=1400, height=800, scale=2)
-        img = Image(io.BytesIO(img_bytes), width=avail_w, height=avail_w * (800/1400))
-        if img.drawHeight > avail_h:
-            ratio = avail_h / img.drawHeight
-            img.drawHeight = avail_h
+        # Moderate resolution — sharp on screen/print without bloating the PDF.
+        img_bytes = pio.to_image(fig, format="png", width=1000, height=560, scale=1.4)
+        img = Image(io.BytesIO(img_bytes), width=avail_w, height=avail_w * (560/1000))
+        if img.drawHeight > per_chart_h:
+            ratio = per_chart_h / img.drawHeight
+            img.drawHeight = per_chart_h
             img.drawWidth  = img.drawWidth * ratio
         story.append(img)
-        if i < len(figures) - 1:
-            from reportlab.platypus import PageBreak
+
+        if i % 2 == 0 and i < len(figures) - 1:
+            story.append(Spacer(1, 0.2*inch))
+        elif i < len(figures) - 1:
             story.append(PageBreak())
 
-    doc.build(story)
+    decorator = _make_page_decorator()
+    doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     return buf.getvalue()
 
 

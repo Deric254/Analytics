@@ -89,6 +89,8 @@ app.layout = html.Div([
     # Use localStorage so data survives page refresh within same session
     dcc.Store(id="shared-dataset",       storage_type="local"),
     dcc.Store(id="shared-visual-config", storage_type="session"),
+    # Custom chart gallery — global so it's never recreated/reset by page navigation
+    dcc.Store(id="viz-custom-gallery",   storage_type="session", data=[]),
     # Trigger that fires once on page load to seed sample data
     dcc.Store(id="app-initialized",      storage_type="session", data=False),
     sidebar,

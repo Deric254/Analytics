@@ -39,8 +39,6 @@ layout = html.Div([
            style={"color": "#6b7280", "fontSize": "13px", "marginBottom": "20px"}),
 
     dcc.Store(id="rpt-store", storage_type="session"),
-    # Reads the chart gallery built on the Visualization page — never created or modified here
-    dcc.Store(id="viz-custom-gallery", storage_type="session", data=[]),
 
     html.Div([
         html.Button("📄 Generate Report", id="rpt-generate", n_clicks=0, style={
@@ -171,9 +169,10 @@ def generate(_, shared_dataset, gallery, include_charts):
         # Charts preview — mirrors exactly what goes into the PDF
         _card(f"📊 Charts Included in PDF ({len(gallery or [])})", [
             html.Div([
-                dcc.Graph(figure=pio.from_json(item["fig_json"]),
+                dcc.Graph(id={"type": "rpt-gallery-graph", "uid": item.get("id", str(i))},
+                          figure=pio.from_json(item["fig_json"]),
                           config={"displaylogo": False}, style={"height": "280px"})
-                for item in (gallery or [])
+                for i, item in enumerate(gallery or [])
             ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(300px, 1fr))",
                        "gap": "12px"})
         ]) if include else html.Div(),

@@ -74,8 +74,6 @@ layout = html.Div([
 
     # Auto charts — stored for export
     dcc.Store(id="viz-charts-store",       storage_type="session"),
-    # Custom-built charts accumulate here — never wiped by a new build
-    dcc.Store(id="viz-custom-gallery",     storage_type="session", data=[]),
     dcc.Loading(html.Div(id="viz-auto"), type="circle"),
 
     # Custom builder
@@ -684,19 +682,24 @@ def add_to_gallery(n_clicks, current_fig, chart_type, x, y, gallery):
         return dash.no_update, "⚠ Build a chart first"
 
     import plotly.graph_objects as go
+    import uuid
     fig = go.Figure(current_fig)
     fig_json = fig.to_json()
 
     y_label = ", ".join(y) if isinstance(y, list) else (y or "")
     label = f"{chart_type}: {y_label} by {x}" if x else f"{chart_type}: {y_label}"
 
-    gallery = gallery or []
-    gallery.append({"label": label, "fig_json": fig_json})
+    # Work on a fresh copy — never mutate the incoming list/dicts in place.
+    gallery = list(gallery) if gallery else []
+    gallery.append({"id": uuid.uuid4().hex, "label": label, "fig_json": fig_json})
 
     return gallery, f"✓ Added — {len(gallery)} chart(s) in gallery"
 
 
 # ── Render gallery — accumulates, each chart shown side by side ───────────────
+# Each card/graph gets a stable id derived from its own uuid (not its list
+# position), so the browser never reuses a previous chart's DOM/Plotly
+# instance for a different one when the gallery grows, shrinks, or reorders.
 
 @dash.callback(
     Output("viz-gallery-section", "children"),
@@ -709,19 +712,21 @@ def render_gallery(gallery):
 
     import plotly.io as pio
     cards = []
-    for i, item in enumerate(gallery):
+    for item in gallery:
+        uid = item.get("id") or item["label"]
         fig = pio.from_json(item["fig_json"])
         cards.append(
             html.Div([
                 html.Div([
                     html.Span(item["label"], style={"fontSize": "12px", "fontWeight": "600", "color": "#374151"}),
-                    html.Button("✕", id={"type": "viz-remove-gallery", "index": i}, n_clicks=0, style={
+                    html.Button("✕", id={"type": "viz-remove-gallery", "uid": uid}, n_clicks=0, style={
                         "float": "right", "background": "none", "border": "none",
                         "color": "#ef4444", "cursor": "pointer", "fontWeight": "700", "fontSize": "14px",
                     }),
                 ], style={"marginBottom": "6px"}),
-                dcc.Graph(figure=fig, config=CFG, style={"height": "320px"}),
-            ], style={
+                dcc.Graph(id={"type": "viz-gallery-graph", "uid": uid},
+                          figure=fig, config=CFG, style={"height": "320px"}),
+            ], id={"type": "viz-gallery-card", "uid": uid}, style={
                 "background": "#fff", "borderRadius": "10px", "padding": "12px",
                 "boxShadow": "0 1px 6px rgba(0,0,0,0.07)", "border": "1px solid #e5e7eb",
                 "flex": "1 1 calc(50% - 8px)", "minWidth": "320px",
@@ -738,7 +743,7 @@ def render_gallery(gallery):
 
 @dash.callback(
     Output("viz-custom-gallery", "data", allow_duplicate=True),
-    Input({"type": "viz-remove-gallery", "index": dash.ALL}, "n_clicks"),
+    Input({"type": "viz-remove-gallery", "uid": dash.ALL}, "n_clicks"),
     State("viz-custom-gallery", "data"),
     prevent_initial_call=True,
 )
@@ -746,7 +751,8 @@ def remove_from_gallery(n_clicks_list, gallery):
     triggered = ctx.triggered_id
     if not triggered or not gallery:
         return dash.no_update
-    idx = triggered["index"]
-    if 0 <= idx < len(gallery):
-        gallery = [g for i, g in enumerate(gallery) if i != idx]
+    if not any(n_clicks_list):  # initial render of new buttons fires with n_clicks=0 — ignore
+        return dash.no_update
+    uid = triggered["uid"]
+    gallery = [g for g in gallery if (g.get("id") or g["label"]) != uid]
     return gallery
