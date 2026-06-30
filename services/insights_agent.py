@@ -205,13 +205,24 @@ def _coerce(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fmt(v) -> str:
+    """Always 2 decimal places, comma-separated thousands. Clean and consistent."""
+    try:
+        f = float(v)
+        if math.isnan(f): return "N/A"
+        return f"{f:,.2f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _fmt_compact(v) -> str:
+    """Compact K/M/B format for chart labels and tight spaces — still 2 decimals."""
     try:
         f = float(v)
         if math.isnan(f): return "N/A"
         if abs(f) >= 1_000_000_000: return f"{f/1_000_000_000:,.2f}B"
         if abs(f) >= 1_000_000:     return f"{f/1_000_000:,.2f}M"
-        if abs(f) >= 1_000:         return f"{f:,.0f}"
-        return f"{f:.2f}"
+        if abs(f) >= 1_000:         return f"{f/1_000:,.2f}K"
+        return f"{f:,.2f}"
     except (TypeError, ValueError):
         return str(v)
 
@@ -817,11 +828,3 @@ def generate_insight(query: str, df: "pd.DataFrame | None" = None) -> str:
                 f"Columns: {', '.join(df.columns.tolist())}\n\n"
                 f"Please check your data has at least one numeric column.\n\n"
                 f"Details: {traceback.format_exc()}")
-
-
-# Keep these accessible for imports from other modules
-def _detect_dates(df): return DataProfile(df)._find_dates()
-def _best_num(df, query=""): return DataProfile(df, query).value_col
-def _best_cat(df, query=""): 
-    p = DataProfile(df, query)
-    return p.group_cols[0] if p.group_cols else None

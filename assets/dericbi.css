@@ -88,3 +88,12 @@ body {
   #sidebar { width: 0; overflow: hidden; padding: 0; }
   div[style*="marginLeft: 200px"] { margin-left: 0 !important; padding: 16px !important; }
 }
+
+/* ── Upload dropzone ─────────────────────────────────────────── */
+#upload-data {
+  transition: border-color 0.2s, background 0.2s !important;
+}
+#upload-data:hover {
+  border-color: #2d6649 !important;
+  background: #dcfce7 !important;
+}

@@ -24,14 +24,35 @@ layout = html.Div([
             dcc.Upload(
                 id="upload-data",
                 children=html.Div([
-                    html.Div("🗂", style={"fontSize": "32px", "marginBottom": "8px"}),
-                    html.Div("Drag & drop or click to select", style={"fontWeight": "600", "color": "#374151"}),
-                    html.Div("CSV or Excel (.xlsx / .xls)", style={"fontSize": "12px", "color": "#9ca3af", "marginTop": "4px"}),
-                ], style={"textAlign": "center", "padding": "20px 0"}),
+                    html.Div("📂", style={"fontSize": "40px", "marginBottom": "10px"}),
+                    html.Div("Drag & drop your file here", style={
+                        "fontWeight": "700", "color": "#374151", "fontSize": "15px"
+                    }),
+                    html.Div("or click to browse", style={
+                        "fontSize": "13px", "color": "#3e8865", "marginTop": "4px",
+                        "fontWeight": "600",
+                    }),
+                    html.Div("CSV · Excel (.xlsx / .xls)", style={
+                        "fontSize": "12px", "color": "#9ca3af", "marginTop": "8px",
+                    }),
+                ], style={
+                    "textAlign": "center",
+                    "display": "flex", "flexDirection": "column",
+                    "alignItems": "center", "justifyContent": "center",
+                    "height": "100%",
+                }),
                 style={
-                    "width": "100%", "border": "2px dashed #d1d5db",
-                    "borderRadius": "10px", "cursor": "pointer",
-                    "background": "#f9fafb", "transition": "border-color 0.2s",
+                    "width": "100%",
+                    "minHeight": "160px",
+                    "border": "2px dashed #3e8865",
+                    "borderRadius": "12px",
+                    "cursor": "pointer",
+                    "background": "#f0fdf4",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "transition": "all 0.2s",
+                    "boxSizing": "border-box",
                 },
                 multiple=False,
             ),
@@ -208,7 +229,7 @@ def parse_contents(contents, filename):
         style_cell={"fontSize": "12px", "padding": "6px 10px"},
         page_size=10,
     )
-    dataset  = {"filename": filename, "records": df.to_dict("records")}
+    dataset  = {"filename": filename, "records": df.to_dict("records"), "is_sample": False}
     msg      = _success_msg(f"✓ Loaded {filename} — {len(df):,} rows × {len(df.columns)} columns")
     return profile, msg, preview, dataset
 
@@ -332,7 +353,7 @@ def update_output(contents, test_clicks, run_clicks, filename,
                 style_cell={"fontSize": "12px", "padding": "6px 10px"},
                 page_size=10,
             )
-            dataset = {"filename": f"{db_type}_query", "records": df.to_dict("records")}
+            dataset = {"filename": f"{db_type}_query", "records": df.to_dict("records"), "is_sample": False}
             return profile, _success_msg(f"✓ Query returned {len(df):,} rows × {len(df.columns)} columns"), preview, dataset
         except Exception as exc:
             return no_update, _error_msg(f"Database error: {exc}"), no_update, no_update

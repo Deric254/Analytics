@@ -3,7 +3,6 @@ Export utilities — fully dynamic, uses DataProfile column detection.
 No hardcoded column names.
 """
 import io
-import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -13,12 +12,11 @@ import plotly.io as pio
 
 
 def _fmt(v) -> str:
+    """Always 2 decimal places, comma-separated thousands. Clean and consistent."""
     try:
         f = float(v)
         if np.isnan(f): return "N/A"
-        if abs(f) >= 1_000_000: return f"{f/1_000_000:,.2f}M"
-        if abs(f) >= 1_000:     return f"{f:,.0f}"
-        return f"{f:.2f}"
+        return f"{f:,.2f}"
     except (TypeError, ValueError):
         return str(v)
 
@@ -296,100 +294,122 @@ def _auto_findings(df, p, source_name) -> list[str]:
     return findings
 
 
-def report_to_html(report_data: dict) -> str:
-    ov = report_data["overview"]
-    parts = [
-        "<html><head><meta charset='utf-8'>",
-        "<style>body{font-family:Segoe UI,sans-serif;margin:40px;color:#1f2937}"
-        "h1{color:#3e8865}h2{color:#374151;border-bottom:2px solid #e5e7eb;padding-bottom:6px}"
-        "table{border-collapse:collapse;width:100%}th{background:#f3f4f6;font-weight:700}"
-        "td,th{border:1px solid #e5e7eb;padding:7px 10px;font-size:13px}"
-        "tr:nth-child(even){background:#f9fafb}.finding{background:#f0fdf4;"
-        "border-left:4px solid #3e8865;padding:12px 16px;margin:8px 0;border-radius:4px}</style>",
-        "<title>DericBI Report</title></head><body>",
-        f"<h1>Dataset Report — {ov['source']}</h1>",
-        f"<p><b>Generated:</b> {ov['generated_at']}  |  "
-        f"<b>Domain:</b> {ov['domain']}  |  "
-        f"<b>Rows:</b> {ov['rows']:,}  |  <b>Columns:</b> {ov['columns']}</p>",
-        f"<p><b>Completeness:</b> {100-ov['missing_pct']:.1f}%  |  "
-        f"<b>Missing values:</b> {ov['missing']:,}  |  "
-        f"<b>Duplicates:</b> {ov['duplicates']:,}</p>",
-        f"<p><b>Key metric:</b> {ov['value_col']}  |  "
-        f"<b>Main groups:</b> {ov['group_cols']}</p>",
-        "<h2>Executive Findings</h2>",
-    ]
-    for f in report_data.get("findings", []):
-        parts.append(f"<div class='finding'>{f}</div>")
-
-    ns = report_data.get("numeric_summary", pd.DataFrame())
-    if not ns.empty:
-        parts.append("<h2>Numeric Column Statistics</h2>")
-        parts.append(ns.to_html(index=False, border=0))
-
-    cs = report_data.get("categorical_summary", pd.DataFrame())
-    if not cs.empty:
-        parts.append("<h2>Categorical Column Statistics</h2>")
-        parts.append(cs.to_html(index=False, border=0))
-
-    sr = report_data.get("sample_rows", pd.DataFrame())
-    if not sr.empty:
-        parts.append("<h2>Sample Records (first 20 rows)</h2>")
-        parts.append(sr.to_html(index=False, border=0))
-
-    parts.append("</body></html>")
-    return "\n".join(parts)
-
-
 def report_to_pdf(report_data: dict) -> bytes:
-    # Lazy import — keeps startup fast
+    """
+    Business-oriented PDF report. Executive findings are the centerpiece —
+    presented prominently, before the supporting data tables.
+    """
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
+    from reportlab.lib.enums import TA_CENTER
     from reportlab.platypus import (
-        Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, HRFlowable
     )
+
     buf    = io.BytesIO()
-    doc    = SimpleDocTemplate(buf, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story  = []
-    ov     = report_data["overview"]
+    doc    = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=0.6*inch, rightMargin=0.6*inch,
+        topMargin=0.5*inch, bottomMargin=0.5*inch,
+    )
+    base_styles = getSampleStyleSheet()
+    ov = report_data["overview"]
 
-    story.append(Paragraph(f"Dataset Report — {ov['source']}", styles["Title"]))
-    story.append(Spacer(1, 0.2*inch))
-    for line in [
-        f"Generated: {ov['generated_at']}",
-        f"Domain: {ov['domain']}   |   Rows: {ov['rows']:,}   |   Columns: {ov['columns']}",
-        f"Completeness: {100-ov['missing_pct']:.1f}%   |   Missing: {ov['missing']:,}   |   Duplicates: {ov['duplicates']:,}",
-        f"Key metric: {ov['value_col']}   |   Main groups: {ov['group_cols']}",
-    ]:
-        story.append(Paragraph(line, styles["BodyText"]))
+    brand_green = colors.HexColor("#3e8865")
+    text_grey   = colors.HexColor("#374151")
+    light_grey  = colors.HexColor("#9ca3af")
 
-    story.append(Spacer(1, 0.2*inch))
-    story.append(Paragraph("Executive Findings", styles["Heading2"]))
-    for f in report_data.get("findings", []):
-        story.append(Paragraph(f"• {f}", styles["BodyText"]))
-        story.append(Spacer(1, 0.08*inch))
+    title_style = ParagraphStyle(
+        "DericTitle", parent=base_styles["Title"],
+        textColor=brand_green, fontSize=22, spaceAfter=4,
+    )
+    subtitle_style = ParagraphStyle(
+        "DericSubtitle", parent=base_styles["BodyText"],
+        textColor=light_grey, fontSize=10, spaceAfter=14,
+    )
+    section_style = ParagraphStyle(
+        "DericSection", parent=base_styles["Heading2"],
+        textColor=text_grey, fontSize=14, spaceBefore=14, spaceAfter=8,
+        borderColor=brand_green, borderWidth=0, leftIndent=0,
+    )
+    finding_style = ParagraphStyle(
+        "DericFinding", parent=base_styles["BodyText"],
+        textColor=text_grey, fontSize=10.5, leading=15,
+        leftIndent=10, spaceAfter=8,
+        borderColor=brand_green, borderWidth=0,
+    )
+    meta_style = ParagraphStyle(
+        "DericMeta", parent=base_styles["BodyText"],
+        textColor=text_grey, fontSize=9.5, leading=14,
+    )
 
-    def add_df_table(title, frame, max_rows=30):
-        if frame is None or frame.empty: return
-        story.append(Spacer(1, 0.15*inch))
-        story.append(Paragraph(title, styles["Heading2"]))
+    story = []
+
+    # ── Cover header ──────────────────────────────────────────────────────────
+    story.append(Paragraph(f"Business Report — {ov['source']}", title_style))
+    story.append(Paragraph(
+        f"Generated {ov['generated_at']}  ·  Domain: {ov['domain'].title()}  ·  "
+        f"{ov['rows']:,} records analysed",
+        subtitle_style,
+    ))
+    story.append(HRFlowable(width="100%", thickness=1.2, color=brand_green, spaceAfter=14))
+
+    # ── Key facts strip ───────────────────────────────────────────────────────
+    facts = [
+        ["Rows", f"{ov['rows']:,}", "Columns", f"{ov['columns']}"],
+        ["Completeness", f"{100-ov['missing_pct']:.1f}%", "Duplicates", f"{ov['duplicates']:,}"],
+        ["Key metric", ov["value_col"], "Main groups", ov["group_cols"]],
+    ]
+    fact_table = Table(facts, colWidths=[1.2*inch, 1.7*inch, 1.2*inch, 1.7*inch])
+    fact_table.setStyle(TableStyle([
+        ("FONTNAME",   (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME",   (2, 0), (2, -1), "Helvetica-Bold"),
+        ("FONTSIZE",   (0, 0), (-1, -1), 9.5),
+        ("TEXTCOLOR",  (0, 0), (-1, -1), text_grey),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("LINEBELOW",  (0, 0), (-1, -2), 0.4, colors.HexColor("#f3f4f6")),
+    ]))
+    story.append(fact_table)
+    story.append(Spacer(1, 0.15*inch))
+
+    # ── Executive Findings — the centerpiece ─────────────────────────────────
+    story.append(Paragraph("Executive Findings", section_style))
+    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#e5e7eb"), spaceAfter=10))
+    for i, f in enumerate(report_data.get("findings", []), 1):
+        # Strip leading emoji for clean PDF typography, keep the message
+        clean = f.encode("ascii", "ignore").decode("ascii").strip() if any(ord(c) > 127 for c in f[:2]) else f
+        clean = clean if clean else f
+        story.append(Paragraph(f"<b>{i}.</b> {clean}", finding_style))
+
+    story.append(Spacer(1, 0.1*inch))
+
+    # ── Supporting data tables ───────────────────────────────────────────────
+    def add_df_table(title, frame, max_rows=20):
+        if frame is None or frame.empty:
+            return
+        story.append(Paragraph(title, section_style))
         limited = frame.head(max_rows).fillna("—").astype(str)
         data    = [limited.columns.tolist()] + limited.values.tolist()
         tbl     = Table(data, repeatRows=1)
         tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0),(-1,0), colors.lightgrey),
-            ("GRID",       (0,0),(-1,-1), 0.4, colors.grey),
-            ("FONTNAME",   (0,0),(-1,0), "Helvetica-Bold"),
-            ("FONTSIZE",   (0,0),(-1,-1), 7.5),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#f9fafb")]),
+            ("BACKGROUND",     (0, 0), (-1, 0), brand_green),
+            ("TEXTCOLOR",      (0, 0), (-1, 0), colors.white),
+            ("FONTNAME",       (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE",       (0, 0), (-1, -1), 7.5),
+            ("GRID",           (0, 0), (-1, -1), 0.3, colors.HexColor("#e5e7eb")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+            ("TOPPADDING",     (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING",  (0, 0), (-1, -1), 4),
         ]))
         story.append(tbl)
+        story.append(Spacer(1, 0.1*inch))
 
     add_df_table("Numeric Column Statistics",     report_data.get("numeric_summary"))
     add_df_table("Categorical Column Statistics", report_data.get("categorical_summary"))
-    add_df_table("Sample Records",               report_data.get("sample_rows"))
+    add_df_table("Sample Records",                report_data.get("sample_rows"))
 
     doc.build(story)
     return buf.getvalue()
@@ -402,17 +422,54 @@ def df_to_excel(df: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 
-def figures_to_zip(figures: list) -> bytes:
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, fig in enumerate(figures, 1):
-            zf.writestr(f"figure_{i}.html",
-                        fig.to_html(full_html=True, include_plotlyjs="cdn"))
-    return out.getvalue()
+def figures_to_pdf(figures: list, title: str = "DericBI Charts") -> bytes:
+    """
+    Render a list of Plotly figure JSON strings to a single PDF.
+    One chart per page, image sized to fill the page with minimal margin.
+    """
+    import plotly.io as pio
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Image, Spacer, Paragraph
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=0.3*inch, rightMargin=0.3*inch,
+        topMargin=0.3*inch, bottomMargin=0.3*inch,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    page_w, page_h = landscape(A4)
+    avail_w = page_w - 0.6*inch
+    avail_h = page_h - 0.7*inch
+
+    for i, fig_json in enumerate(figures):
+        fig = pio.from_json(fig_json) if isinstance(fig_json, str) else fig_json
+        # Tight layout — no extra whitespace inside the chart itself
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=50, b=40),
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+        )
+        img_bytes = pio.to_image(fig, format="png", width=1400, height=800, scale=2)
+        img = Image(io.BytesIO(img_bytes), width=avail_w, height=avail_w * (800/1400))
+        if img.drawHeight > avail_h:
+            ratio = avail_h / img.drawHeight
+            img.drawHeight = avail_h
+            img.drawWidth  = img.drawWidth * ratio
+        story.append(img)
+        if i < len(figures) - 1:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+
+    doc.build(story)
+    return buf.getvalue()
 
 
-# Legacy alias used by reporting.py
+# Legacy alias used by pages/cleaning.py and pages/reporting.py
 build_exhaustive_report_data = build_report_data
-report_data_to_html          = report_to_html
 report_data_to_pdf_bytes     = report_to_pdf
 dataframe_to_excel_bytes     = df_to_excel

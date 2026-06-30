@@ -1,10 +1,9 @@
 """
 Exploration — slice, filter, aggregate, compare. Auto-populates from DataProfile.
-Numeric filter columns get a RangeSlider; categorical columns keep the multi-select dropdown.
 Results show immediately on load. Push to Visualization works.
 """
 import dash
-from dash import html, dcc, dash_table, Input, Output, State, ctx, ALL
+from dash import html, dcc, dash_table, Input, Output, State, ctx
 import plotly.express as px
 import pandas as pd
 import numpy as np
@@ -30,21 +29,6 @@ def _kpi_card(title, value, sub=""):
         html.Div(sub,    style={"fontSize":"11px","color":"#9ca3af"}),
     ], style={"background":"#fff","borderRadius":"10px","padding":"14px 16px","flex":"1","minWidth":"130px",
                "boxShadow":"0 1px 6px rgba(0,0,0,0.07)","border":"1px solid #e5e7eb"})
-
-# Filter section — two filter slots rendered dynamically
-def _filter_slot(n, label):
-    return html.Div([
-        html.Label(label, style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
-        dcc.Dropdown(id=f"exp-f{n}-col", placeholder="Column..."),
-        # This container gets replaced dynamically with either a Dropdown or RangeSlider
-        html.Div(id=f"exp-f{n}-control", style={"marginTop":"4px"}),
-        # Static hidden dropdown so Dash registers the ID on initial load.
-        # The f{n}-control callback overwrites this with the real control.
-        dcc.Dropdown(id=f"exp-f{n}-vals", multi=True, placeholder="Values…",
-                     options=[], style={"display":"none"}),
-        # Hidden store (unused now but kept for future extension)
-        dcc.Store(id=f"exp-f{n}-range"),
-    ], style={"marginBottom":"12px"})
 
 layout = html.Div([
     html.H2("Data Exploration", style={"marginBottom":"4px","color":"#1f2937"}),
@@ -94,8 +78,19 @@ layout = html.Div([
             html.Div("Filters", style={"fontSize":"12px","fontWeight":"700","color":"#6b7280",
                                        "marginBottom":"10px","textTransform":"uppercase"}),
 
-            _filter_slot(1, "Filter column 1"),
-            _filter_slot(2, "Filter column 2"),
+            html.Div([
+                html.Label("Filter column 1", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-f1-col", placeholder="Column..."),
+                dcc.Dropdown(id="exp-f1-val", multi=True, placeholder="Values...",
+                             style={"marginTop":"4px"}),
+            ], style={"marginBottom":"12px"}),
+
+            html.Div([
+                html.Label("Filter column 2", style={"fontSize":"12px","fontWeight":"600","color":"#6b7280"}),
+                dcc.Dropdown(id="exp-f2-col", placeholder="Column..."),
+                dcc.Dropdown(id="exp-f2-val", multi=True, placeholder="Values...",
+                             style={"marginTop":"4px"}),
+            ], style={"marginBottom":"16px"}),
 
             html.Div([
                 html.Button("Explore →", id="exp-apply", n_clicks=0, style={
@@ -132,7 +127,7 @@ layout = html.Div([
 ])
 
 
-# ── Populate main dropdowns ───────────────────────────────────────────────────
+# ── Populate dropdowns from DataProfile ───────────────────────────────────────
 
 @dash.callback(
     Output("exp-metrics", "options"),
@@ -150,109 +145,36 @@ def populate_dropdowns(shared_dataset):
     p    = DataProfile(df)
     nums = [{"label": c, "value": c} for c in p.numeric_cols]
     all_cols = [{"label": c, "value": c} for c in df.columns]
+    # Smart defaults from DataProfile
     default_metrics = [p.value_col] if p.value_col else p.numeric_cols[:2]
     default_group   = p.group_cols[0] if p.group_cols else None
     return nums, default_metrics, all_cols, default_group, all_cols, all_cols
 
 
-# ── Dynamic filter controls — numeric → RangeSlider, categorical → Dropdown ──
-
-def _make_range_slider(col, df):
-    """Build a RangeSlider for a numeric column with nice step/marks."""
-    s = pd.to_numeric(df[col], errors="coerce").dropna()
-    if s.empty:
-        return html.Div("No numeric values.", style={"fontSize":"11px","color":"#9ca3af"})
-    lo, hi = float(s.min()), float(s.max())
-    if lo == hi:
-        hi = lo + 1
-    span = hi - lo
-    # Choose step — aim for ~20 intervals
-    raw_step = span / 20
-    magnitude = 10 ** np.floor(np.log10(raw_step)) if raw_step > 0 else 1
-    for nice in [1, 2, 5, 10]:
-        step = nice * magnitude
-        if span / step <= 25:
-            break
-    step = round(step, 10)
-    # 5 marks spread across range
-    mark_vals = np.linspace(lo, hi, 5)
-    if abs(hi) >= 1_000_000:
-        marks = {round(v, 2): f"{v/1e6:.1f}M" for v in mark_vals}
-    elif abs(hi) >= 1_000:
-        marks = {round(v, 2): f"{v:,.0f}" for v in mark_vals}
-    else:
-        marks = {round(v, 2): f"{v:.2f}" for v in mark_vals}
-    return html.Div([
-        html.Div(
-            f"{_fmt(lo)} – {_fmt(hi)}",
-            id={"type":"range-label","col":col},
-            style={"fontSize":"11px","color":"#6b7280","marginBottom":"4px"}
-        ),
-        dcc.RangeSlider(
-            id={"type":"exp-range-slider","col":col},
-            min=lo, max=hi, step=step,
-            value=[lo, hi],
-            marks=marks,
-            tooltip={"placement":"bottom","always_visible":False},
-            allowCross=False,
-        ),
-    ], style={"paddingTop":"4px","paddingBottom":"8px"})
-
-
-def _make_cat_dropdown(col, df, slot_id):
+@dash.callback(
+    Output("exp-f1-val", "options"),
+    Input("shared-dataset", "data"),
+    Input("exp-f1-col",    "value"),
+)
+def f1_values(shared_dataset, col):
+    if not shared_dataset or not col: return []
+    df = pd.DataFrame(shared_dataset["records"])
+    if col not in df.columns: return []
     vals = sorted(df[col].dropna().astype(str).unique())[:300]
-    return dcc.Dropdown(
-        id=slot_id,
-        multi=True,
-        placeholder="All values…",
-        options=[{"label": v, "value": v} for v in vals],
-    )
+    return [{"label": v, "value": v} for v in vals]
 
 
 @dash.callback(
-    Output("exp-f1-control", "children"),
-    Output("exp-f1-vals", "options"),
-    Output("exp-f1-vals", "style"),
+    Output("exp-f2-val", "options"),
     Input("shared-dataset", "data"),
-    Input("exp-f1-col", "value"),
+    Input("exp-f2-col",    "value"),
 )
-def f1_control(shared_dataset, col):
-    hidden  = {"display": "none"}
-    visible = {"marginTop": "4px"}
-    if not shared_dataset or not col:
-        return html.Div(), [], hidden
-    df = _coerce(pd.DataFrame(shared_dataset["records"]))
-    if col not in df.columns:
-        return html.Div(), [], hidden
-    is_num = pd.to_numeric(df[col], errors="coerce").notna().mean() >= 0.7
-    if is_num:
-        # Range slider goes into -control; static dropdown stays hidden
-        return _make_range_slider(col, df), [], hidden
-    # Categorical: populate static dropdown and make it visible
+def f2_values(shared_dataset, col):
+    if not shared_dataset or not col: return []
+    df = pd.DataFrame(shared_dataset["records"])
+    if col not in df.columns: return []
     vals = sorted(df[col].dropna().astype(str).unique())[:300]
-    return html.Div(), [{"label": v, "value": v} for v in vals], visible
-
-
-@dash.callback(
-    Output("exp-f2-control", "children"),
-    Output("exp-f2-vals", "options"),
-    Output("exp-f2-vals", "style"),
-    Input("shared-dataset", "data"),
-    Input("exp-f2-col", "value"),
-)
-def f2_control(shared_dataset, col):
-    hidden  = {"display": "none"}
-    visible = {"marginTop": "4px"}
-    if not shared_dataset or not col:
-        return html.Div(), [], hidden
-    df = _coerce(pd.DataFrame(shared_dataset["records"]))
-    if col not in df.columns:
-        return html.Div(), [], hidden
-    is_num = pd.to_numeric(df[col], errors="coerce").notna().mean() >= 0.7
-    if is_num:
-        return _make_range_slider(col, df), [], hidden
-    vals = sorted(df[col].dropna().astype(str).unique())[:300]
-    return html.Div(), [{"label": v, "value": v} for v in vals], visible
+    return [{"label": v, "value": v} for v in vals]
 
 
 # ── Main exploration callback ─────────────────────────────────────────────────
@@ -283,19 +205,13 @@ def _agg_series(s: pd.Series, agg: str):
     State("exp-rank",     "value"),
     State("exp-topn",     "value"),
     State("exp-f1-col",   "value"),
+    State("exp-f1-val",   "value"),
     State("exp-f2-col",   "value"),
-    # Pattern-match all range sliders present
-    State({"type":"exp-range-slider","col":ALL}, "value"),
-    State({"type":"exp-range-slider","col":ALL}, "id"),
-    # Categorical dropdowns (may or may not exist)
-    State("exp-f1-vals",  "value"),
-    State("exp-f2-vals",  "value"),
+    State("exp-f2-val",   "value"),
     prevent_initial_call=True,
 )
 def run_exploration(_, shared_dataset, metrics, groupby, agg, rank, topn,
-                    f1_col, f2_col,
-                    slider_values, slider_ids,
-                    f1_cat_vals, f2_cat_vals):
+                    f1_col, f1_val, f2_col, f2_val):
     if not shared_dataset or not shared_dataset.get("records"):
         return "No data loaded — go to Ingestion first.", [], \
                {"data":[],"layout":{"title":"No data"}}, html.Div()
@@ -303,33 +219,16 @@ def run_exploration(_, shared_dataset, metrics, groupby, agg, rank, topn,
     df = _coerce(pd.DataFrame(shared_dataset["records"]))
     p  = DataProfile(df)
 
-    # Build a lookup: col → range from sliders
-    slider_map = {}
-    for sid, sval in zip(slider_ids, slider_values):
-        if sval:
-            slider_map[sid["col"]] = sval
-
-    # Apply filter 1
-    if f1_col and f1_col in df.columns:
-        num1 = pd.to_numeric(df[f1_col], errors="coerce").notna().mean() >= 0.7
-        if num1 and f1_col in slider_map:
-            lo, hi = slider_map[f1_col]
-            df = df[pd.to_numeric(df[f1_col], errors="coerce").between(lo, hi)]
-        elif not num1 and f1_cat_vals:
-            df = df[df[f1_col].astype(str).isin(f1_cat_vals)]
-
-    # Apply filter 2
-    if f2_col and f2_col in df.columns:
-        num2 = pd.to_numeric(df[f2_col], errors="coerce").notna().mean() >= 0.7
-        if num2 and f2_col in slider_map:
-            lo, hi = slider_map[f2_col]
-            df = df[pd.to_numeric(df[f2_col], errors="coerce").between(lo, hi)]
-        elif not num2 and f2_cat_vals:
-            df = df[df[f2_col].astype(str).isin(f2_cat_vals)]
+    # Apply filters
+    if f1_col and f1_col in df.columns and f1_val:
+        df = df[df[f1_col].astype(str).isin(f1_val)]
+    if f2_col and f2_col in df.columns and f2_val:
+        df = df[df[f2_col].astype(str).isin(f2_val)]
 
     if df.empty:
         return "No rows after filters.", [], {"data":[],"layout":{"title":"No rows after filter"}}, html.Div()
 
+    # Default metrics from DataProfile if none selected
     metrics = metrics or ([p.value_col] if p.value_col else p.numeric_cols[:2])
     metrics = [c for c in (metrics or []) if c in df.columns]
 
@@ -352,40 +251,37 @@ def run_exploration(_, shared_dataset, metrics, groupby, agg, rank, topn,
         else:
             result = result.sort_values(sort_col, ascending=False)
 
+        # Chart
         if len(metrics) == 1:
             fig = px.bar(result.head(30), x=groupby, y=sort_col,
                          title=f"{agg.title()} of {sort_col} by {groupby}",
                          color=sort_col,
                          color_continuous_scale=["#d1fae5", BRAND],
                          text_auto=True)
-            fig.update_traces(texttemplate="%{text}", textposition="outside",
-                              textfont_size=11)
             fig.update_layout(coloraxis_showscale=False)
         else:
             fig = px.bar(result.head(30), x=groupby, y=metrics, barmode="group",
                          title=f"{agg.title()} by {groupby}",
-                         color_discrete_sequence=px.colors.qualitative.Safe,
-                         text_auto=True)
-            fig.update_traces(texttemplate="%{value:,.0f}", textposition="outside",
-                              textfont_size=10)
+                         color_discrete_sequence=px.colors.qualitative.Safe)
 
         fig.update_layout(template="plotly_white",
                           margin=dict(t=50,l=40,r=20,b=60), height=360)
         table_df = result
 
     elif metrics:
+        # No groupby — summary stats
         rows = []
         for m in metrics:
             s = pd.to_numeric(df[m], errors="coerce").dropna()
             rows.append({
-                "Column":  m,
-                "Count":   f"{len(s):,}",
-                "Sum":     _fmt(s.sum()),
-                "Mean":    _fmt(s.mean()),
-                "Median":  _fmt(s.median()),
-                "Std":     _fmt(s.std()),
-                "Min":     _fmt(s.min()),
-                "Max":     _fmt(s.max()),
+                "Column": m,
+                "Count":  f"{len(s):,}",
+                "Sum":    _fmt(s.sum()),
+                "Mean":   _fmt(s.mean()),
+                "Median": _fmt(s.median()),
+                "Std":    _fmt(s.std()),
+                "Min":    _fmt(s.min()),
+                "Max":    _fmt(s.max()),
             })
         table_df = pd.DataFrame(rows)
         fig = px.box(df[metrics], title="Distribution of selected metrics",
@@ -396,6 +292,7 @@ def run_exploration(_, shared_dataset, metrics, groupby, agg, rank, topn,
         return "Select at least one metric.", kpi_cards, \
                {"data":[],"layout":{"title":"Select metrics"}}, html.Div()
 
+    # Table
     table = dash_table.DataTable(
         data=table_df.head(100).to_dict("records"),
         columns=[{"name": c, "id": c} for c in table_df.columns],
