@@ -104,7 +104,6 @@ layout = html.Div([
                     "cursor":"pointer","fontWeight":"600","fontSize":"12px",
                 }),
             ]),
-            dcc.Store(id="shared-visual-config", storage_type="session"),
         ], style={"width":"250px","flexShrink":"0","background":"#fff","borderRadius":"10px",
                   "padding":"18px","boxShadow":"0 1px 6px rgba(0,0,0,0.07)",
                   "border":"1px solid #e5e7eb","alignSelf":"flex-start"}),

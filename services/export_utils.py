@@ -322,6 +322,133 @@ def _make_page_decorator(brand_name="DericBI"):
     return _draw
 
 
+def _decode_plotly_array(v):
+    """
+    Plotly 6.x compresses numeric trace arrays into {'dtype':..., 'bdata': base64}
+    when a figure is round-tripped through to_json()/from_json(). Decode that back
+    into a plain list so downstream analysis sees real numbers, not a dict.
+    """
+    if v is None:
+        return []
+    if isinstance(v, dict) and "bdata" in v:
+        import base64
+        raw = base64.b64decode(v["bdata"])
+        dtype = v.get("dtype", "f8")
+        return np.frombuffer(raw, dtype=dtype).tolist()
+    try:
+        return list(v)
+    except TypeError:
+        return [v]
+
+
+def _analyze_figure(fig_json) -> str:
+    """
+    Generic analyst-style read on a Plotly figure — works for any chart the
+    builder can produce, without needing the original DataFrame. Looks at
+    the figure's own trace data (what's actually plotted) and reasons about
+    leaders, gaps, concentration, and trend direction.
+    """
+    import plotly.io as pio
+    try:
+        fig = pio.from_json(fig_json) if isinstance(fig_json, str) else fig_json
+        traces = fig.data
+        if not traces:
+            return "No plotted data to analyse."
+
+        t0 = traces[0]
+        ttype = getattr(t0, "type", "")
+
+        # Pareto: bar + cumulative-% line
+        if len(traces) >= 2 and ttype == "bar" and getattr(traces[1], "type", "") == "scatter":
+            ys = [v for v in _decode_plotly_array(t0.y) if v is not None]
+            xs = _decode_plotly_array(t0.x)
+            if xs and ys:
+                total = sum(ys)
+                pairs = sorted(zip(xs, ys), key=lambda p: p[1], reverse=True)
+                cum, n80 = 0, 0
+                for _, v in pairs:
+                    cum += v
+                    n80 += 1
+                    if total and cum / total >= 0.8:
+                        break
+                pct_of_cats = 100 * n80 / len(pairs) if pairs else 0
+                return (f"Top {n80} of {len(pairs)} categories ({pct_of_cats:.0f}%) drive 80% of the total. "
+                        f"'{pairs[0][0]}' alone contributes {100*pairs[0][1]/total:.0f}%. "
+                        + ("Heavy concentration — prioritise and protect these few." if pct_of_cats <= 30
+                           else "Fairly distributed — no single segment dominates."))
+
+        if ttype == "bar" and len(traces) == 1:
+            xs = _decode_plotly_array(t0.x)
+            ys = _decode_plotly_array(t0.y)
+            pairs = [(x, y) for x, y in zip(xs, ys) if y is not None]
+            if pairs:
+                pairs.sort(key=lambda p: p[1], reverse=True)
+                total = sum(p[1] for p in pairs)
+                top_name, top_val = pairs[0]
+                share = 100 * top_val / total if total else 0
+                line = f"'{top_name}' leads at {_fmt(top_val)} ({share:.0f}% of total)."
+                if len(pairs) > 1:
+                    second_name, second_val = pairs[1]
+                    line += f" Gap to '{second_name}': {_fmt(top_val - second_val)}."
+                if len(pairs) >= 3:
+                    bot_name, bot_val = pairs[-1]
+                    line += f" Weakest performer: '{bot_name}' at {_fmt(bot_val)}."
+                if share >= 40:
+                    line += " Concentration risk — heavy reliance on the top segment."
+                return line
+
+        if ttype == "pie":
+            labels = _decode_plotly_array(t0.labels)
+            values = _decode_plotly_array(t0.values)
+            pairs = [(l, v) for l, v in zip(labels, values) if v is not None]
+            if pairs:
+                total = sum(p[1] for p in pairs)
+                pairs.sort(key=lambda p: p[1], reverse=True)
+                top_name, top_val = pairs[0]
+                share = 100 * top_val / total if total else 0
+                note = "high concentration — a single segment dominates" if share >= 40 else "reasonably balanced spread"
+                return f"'{top_name}' holds {share:.0f}% of the share — {note}."
+
+        if ttype in ("scatter", "scattergl") and "lines" in (getattr(t0, "mode", "") or ""):
+            ys = [v for v in _decode_plotly_array(t0.y) if v is not None]
+            if len(ys) >= 2:
+                first, last = ys[0], ys[-1]
+                chg = (last - first) / abs(first) * 100 if first else 0
+                if chg > 5:
+                    verdict = "Upward trend — momentum is favourable; protect and reinforce the current drivers."
+                elif chg < -5:
+                    verdict = "Downward trend — investigate what changed before the next reporting cycle."
+                else:
+                    verdict = "Broadly flat — stable, but watch for the next inflection point."
+                return f"Moved {chg:+.1f}% from start to end of the series. {verdict}"
+
+        if ttype == "scatter" and (getattr(t0, "mode", "") or "") == "markers":
+            xs = [v for v in _decode_plotly_array(t0.x) if v is not None]
+            ys = [v for v in _decode_plotly_array(t0.y) if v is not None]
+            if len(xs) >= 3 and len(ys) >= 3:
+                try:
+                    corr = pd.Series(xs).astype(float).corr(pd.Series(ys).astype(float))
+                    if pd.notna(corr) and abs(corr) >= 0.5:
+                        direction = "positive" if corr > 0 else "negative"
+                        return f"Clear {direction} relationship between the two variables (r≈{corr:.2f}) — usable as a lever."
+                except Exception:
+                    pass
+            return "Spread shows the relationship between these two variables — look for clusters or outliers."
+
+        if ttype == "box":
+            return "Distribution by group — wide boxes or many outlier points flag inconsistent performance worth standardising."
+
+        if ttype == "histogram":
+            return "Frequency distribution — skew or multiple peaks usually signal distinct sub-populations worth segmenting separately."
+
+        if ttype == "heatmap":
+            return "Correlation matrix — cells near +1/-1 mark variable pairs worth investigating as cause-and-effect candidates."
+
+    except Exception:
+        pass
+    return "Review for leaders, laggards, and concentration relevant to this metric."
+
+
 def report_to_pdf(report_data: dict) -> bytes:
     """
     Business-oriented PDF report. Executive findings are the centerpiece —
@@ -413,6 +540,66 @@ def report_to_pdf(report_data: dict) -> bytes:
         story.append(Paragraph(f"<b>{i}.</b> {clean}", finding_style))
 
     story.append(Spacer(1, 0.1*inch))
+
+    # ── Visual Analysis — every chart (auto + custom-built), each with its own
+    # analyst-level read, branded consistently with the rest of the report ──
+    charts = report_data.get("charts") or []
+    if charts:
+        import plotly.io as pio
+        from reportlab.platypus import Image, KeepTogether
+
+        chart_title_style = ParagraphStyle(
+            "DericChartTitle", parent=base_styles["Heading3"],
+            textColor=text_grey, fontSize=11, spaceBefore=2, spaceAfter=4,
+        )
+        insight_style = ParagraphStyle(
+            "DericInsight", parent=base_styles["BodyText"],
+            textColor=text_grey, fontSize=9.5, leading=13,
+            leftIndent=8, spaceAfter=4,
+            borderColor=brand_green, borderWidth=0,
+        )
+        insight_label_style = ParagraphStyle(
+            "DericInsightLabel", parent=base_styles["BodyText"],
+            textColor=brand_green, fontSize=8.5, leading=11,
+            spaceAfter=2, fontName="Helvetica-Bold",
+        )
+
+        story.append(Paragraph(f"Visual Analysis ({len(charts)} charts)", section_style))
+        story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#e5e7eb"), spaceAfter=10))
+
+        avail_w = doc.width
+        for item in charts:
+            label    = item.get("label", "Chart")
+            fig_json = item.get("fig_json")
+            if not fig_json:
+                continue
+            try:
+                fig = pio.from_json(fig_json) if isinstance(fig_json, str) else fig_json
+                fig.update_layout(
+                    margin=dict(l=40, r=20, t=40, b=36),
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    font=dict(size=11),
+                )
+                img_bytes = pio.to_image(fig, format="png", width=900, height=440, scale=1.4)
+                img = Image(io.BytesIO(img_bytes), width=avail_w, height=avail_w * (440/900))
+                max_h = 3.0*inch
+                if img.drawHeight > max_h:
+                    ratio = max_h / img.drawHeight
+                    img.drawHeight = max_h
+                    img.drawWidth  = img.drawWidth * ratio
+
+                insight = _analyze_figure(fig_json)
+                block = [
+                    Paragraph(label, chart_title_style),
+                    img,
+                    Spacer(1, 0.04*inch),
+                    Paragraph("ANALYST INSIGHT", insight_label_style),
+                    Paragraph(insight, insight_style),
+                    Spacer(1, 0.18*inch),
+                ]
+                story.append(KeepTogether(block))
+            except Exception as exc:
+                story.append(Paragraph(f"{label} — chart could not be rendered ({exc})", insight_style))
 
     # ── Supporting data tables ───────────────────────────────────────────────
     def add_df_table(title, frame, max_rows=20):

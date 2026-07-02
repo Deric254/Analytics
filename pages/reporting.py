@@ -6,7 +6,7 @@ import dash
 from dash import html, dcc, dash_table, Input, Output, State
 import pandas as pd
 import plotly.io as pio
-from services.export_utils import build_report_data, report_to_pdf, figures_to_pdf
+from services.export_utils import build_report_data, report_to_pdf, _analyze_figure
 
 dash.register_page(__name__, path="/reporting", name="Reporting")
 
@@ -33,6 +33,16 @@ def _row(label, value, note=""):
     ], style={"padding": "5px 0", "borderBottom": "1px solid #f3f4f6"})
 
 
+def _auto_chart_label(fig_json):
+    """Pull the chart's own title (set when it was auto-generated) for use as its report label."""
+    try:
+        fig = pio.from_json(fig_json)
+        t = fig.layout.title.text if fig.layout and fig.layout.title else None
+        return t or "Auto-generated chart"
+    except Exception:
+        return "Auto-generated chart"
+
+
 layout = html.Div([
     html.H2("Reporting", style={"marginBottom": "4px", "color": "#1f2937"}),
     html.P("Generates a business-oriented PDF report — fully dynamic from your data.",
@@ -56,7 +66,7 @@ layout = html.Div([
 
     dcc.Checklist(
         id="rpt-include-charts",
-        options=[{"label": " Include charts from Visualization gallery in the PDF", "value": "yes"}],
+        options=[{"label": " Include all charts (auto-generated + custom-built) with analyst insights", "value": "yes"}],
         value=["yes"],
         style={"fontSize": "13px", "color": "#374151", "marginBottom": "20px"},
     ),
@@ -86,7 +96,7 @@ def _deserialize(s):
         "numeric_summary":     pd.DataFrame(s["numeric_summary"]),
         "categorical_summary": pd.DataFrame(s["categorical_summary"]),
         "sample_rows":         pd.DataFrame(s["sample_rows"]),
-        "gallery":             s.get("gallery", []),
+        "charts":              s.get("charts", []),
     }
 
 
@@ -110,10 +120,11 @@ def _make_table(frame):
     Input("rpt-generate", "n_clicks"),
     State("shared-dataset",     "data"),
     State("viz-custom-gallery", "data"),
+    State("viz-charts-store",   "data"),
     State("rpt-include-charts", "value"),
     prevent_initial_call=True,
 )
-def generate(_, shared_dataset, gallery, include_charts):
+def generate(_, shared_dataset, gallery, auto_figs, include_charts):
     if not shared_dataset or not shared_dataset.get("records"):
         return html.Div("No data loaded — go to Ingestion first.",
                         style={"color": "#dc2626"}), None
@@ -123,7 +134,15 @@ def generate(_, shared_dataset, gallery, include_charts):
     rd = build_report_data(df, source_name=fn)
     ov, ns, cs, sr = rd["overview"], rd["numeric_summary"], rd["categorical_summary"], rd["sample_rows"]
 
-    include = bool(gallery and include_charts and "yes" in (include_charts or []))
+    # Merge both sources — auto-generated dashboard charts AND everything the
+    # user built and saved in the custom gallery. Nothing is dropped.
+    all_charts = []
+    for fj in (auto_figs or []):
+        all_charts.append({"label": f"📊 {_auto_chart_label(fj)}", "fig_json": fj})
+    for item in (gallery or []):
+        all_charts.append({"label": f"🛠 Custom — {item.get('label', 'Chart')}", "fig_json": item["fig_json"]})
+
+    include = bool(all_charts and include_charts and "yes" in (include_charts or []))
 
     layout_out = html.Div([
         # Header
@@ -166,15 +185,25 @@ def generate(_, shared_dataset, gallery, include_charts):
         _card("Numeric Column Statistics", [_make_table(ns)]) if not ns.empty else html.Div(),
         _card("Categorical Column Statistics", [_make_table(cs)]) if not cs.empty else html.Div(),
 
-        # Charts preview — mirrors exactly what goes into the PDF
-        _card(f"📊 Charts Included in PDF ({len(gallery or [])})", [
+        # Charts preview — mirrors exactly what goes into the PDF, insight included
+        _card(f"📊 Visual Analysis Included in PDF ({len(all_charts)} charts)", [
             html.Div([
-                dcc.Graph(id={"type": "rpt-gallery-graph", "uid": item.get("id", str(i))},
-                          figure=pio.from_json(item["fig_json"]),
-                          config={"displaylogo": False}, style={"height": "280px"})
-                for i, item in enumerate(gallery or [])
-            ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(300px, 1fr))",
-                       "gap": "12px"})
+                html.Div([
+                    html.Div(item["label"], style={"fontSize": "12px", "fontWeight": "700",
+                                                     "color": "#374151", "marginBottom": "6px"}),
+                    dcc.Graph(id={"type": "rpt-gallery-graph", "uid": f"{i}-{item['label']}"},
+                              figure=pio.from_json(item["fig_json"]),
+                              config={"displaylogo": False}, style={"height": "260px"}),
+                    html.Div([
+                        html.Span("ANALYST INSIGHT  ", style={"fontSize": "10.5px", "fontWeight": "700", "color": BRAND}),
+                        html.Span(_analyze_figure(item["fig_json"]), style={"fontSize": "11.5px", "color": "#374151"}),
+                    ], style={"marginTop": "8px", "padding": "8px 10px", "background": "#f8fafb",
+                              "borderRadius": "6px", "borderLeft": f"3px solid {BRAND}"}),
+                ], style={"background": "#fff", "border": "1px solid #e5e7eb", "borderRadius": "8px",
+                          "padding": "10px"})
+                for i, item in enumerate(all_charts)
+            ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(340px, 1fr))",
+                       "gap": "14px"})
         ]) if include else html.Div(),
 
         _card("Sample Records (first 20)", [_make_table(sr)]),
@@ -182,7 +211,7 @@ def generate(_, shared_dataset, gallery, include_charts):
 
     serialized = _serialize(rd)
     if serialized is not None:
-        serialized["gallery"] = gallery if include else []
+        serialized["charts"] = all_charts if include else []
 
     return layout_out, serialized
 
@@ -199,20 +228,4 @@ def dl_pdf(_, store):
         return None
 
     pdf_bytes = report_to_pdf(rd)
-
-    gallery = rd.get("gallery", [])
-    if gallery:
-        from pypdf import PdfWriter, PdfReader
-        import io
-
-        chart_pdf_bytes = figures_to_pdf([g["fig_json"] for g in gallery], title="Charts")
-        writer = PdfWriter()
-        for src_bytes in (pdf_bytes, chart_pdf_bytes):
-            reader = PdfReader(io.BytesIO(src_bytes))
-            for page in reader.pages:
-                writer.add_page(page)
-        merged = io.BytesIO()
-        writer.write(merged)
-        pdf_bytes = merged.getvalue()
-
     return dcc.send_bytes(lambda s: s.write(pdf_bytes), "dericbi_report.pdf")
