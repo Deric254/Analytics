@@ -87,7 +87,7 @@ content = html.Div(
 app.layout = html.Div([
     dcc.Location(id="url", refresh=False),
     # Use localStorage so data survives page refresh within same session
-    dcc.Store(id="shared-dataset",       storage_type="local"),
+    dcc.Store(id="shared-dataset",       storage_type="session"),
     dcc.Store(id="shared-visual-config", storage_type="session"),
     # Custom chart gallery — global so it's never recreated/reset by page navigation
     dcc.Store(id="viz-custom-gallery",   storage_type="session", data=[]),
@@ -101,12 +101,12 @@ app.layout = html.Div([
 # ── Seed sample data on first load ────────────────────────────────────────────
 
 @app.callback(
-    Output("shared-dataset",    "data"),
+    Output("shared-dataset",    "data", allow_duplicate=True),
     Output("app-initialized",   "data"),
     Output("sidebar-data-badge","children"),
     Input("app-initialized",    "data"),
     State("shared-dataset",     "data"),
-    prevent_initial_call='initial_duplicate',
+    prevent_initial_call="initial_duplicate",
 )
 def initialize(initialized, existing_dataset):
     # If already initialized this session, do nothing
