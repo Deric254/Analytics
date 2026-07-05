@@ -449,6 +449,55 @@ def _analyze_figure(fig_json) -> str:
     return "Review for leaders, laggards, and concentration relevant to this metric."
 
 
+def _ai_executive_summary(report_data: dict) -> str:
+    """
+    Ask the AI assistant to turn the rule-based findings and chart insights
+    into a short, cohesive business narrative — 3-5 sentences, no jargon,
+    grounded only in the facts already computed (no hallucination risk since
+    the AI is given the exact numbers to work from, not raw data).
+    Falls back to a plain join of findings if no AI key is configured or the
+    call fails for any reason — the report never breaks.
+    """
+    try:
+        from services.ai_assistant import ask as ai_ask
+    except Exception:
+        return " ".join(report_data.get("findings", [])[:3])
+
+    ov       = report_data.get("overview", {})
+    findings = report_data.get("findings", [])
+    charts   = report_data.get("charts", []) or []
+
+    chart_notes = []
+    for item in charts[:6]:
+        fig_json = item.get("fig_json")
+        if fig_json:
+            chart_notes.append(_analyze_figure(fig_json))
+
+    context_lines = [
+        f"Dataset: {ov.get('source','data')}, domain: {ov.get('domain','general')}, "
+        f"{ov.get('rows',0):,} records.",
+        "Computed findings: " + " | ".join(findings[:6]),
+    ]
+    if chart_notes:
+        context_lines.append("Chart-level observations: " + " | ".join(chart_notes))
+
+    prompt = (
+        "Write a short executive summary (3-5 sentences, plain business language, "
+        "no bullet points, no headers) for a business report, based ONLY on these "
+        "computed facts — do not invent numbers not given here:\n\n"
+        + "\n".join(context_lines)
+    )
+
+    try:
+        narrative = ai_ask(prompt, df=None)
+        if narrative and len(narrative.strip()) > 20 and "No AI API key" not in narrative:
+            return narrative.strip()
+    except Exception:
+        pass
+
+    return " ".join(findings[:4]) if findings else "No significant findings to report."
+
+
 def report_to_pdf(report_data: dict) -> bytes:
     """
     Business-oriented PDF report. Executive findings are the centerpiece —
@@ -530,16 +579,30 @@ def report_to_pdf(report_data: dict) -> bytes:
     story.append(fact_table)
     story.append(Spacer(1, 0.15*inch))
 
-    # ── Executive Findings — the centerpiece ─────────────────────────────────
-    story.append(Paragraph("Executive Findings", section_style))
+    # ── AI Executive Summary — the centerpiece, written in business language ──
+    story.append(Paragraph("Executive Summary", section_style))
     story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#e5e7eb"), spaceAfter=10))
-    for i, f in enumerate(report_data.get("findings", []), 1):
-        # Strip leading emoji for clean PDF typography, keep the message
-        clean = f.encode("ascii", "ignore").decode("ascii").strip() if any(ord(c) > 127 for c in f[:2]) else f
-        clean = clean if clean else f
-        story.append(Paragraph(f"<b>{i}.</b> {clean}", finding_style))
+    narrative = _ai_executive_summary(report_data)
+    story.append(Paragraph(narrative, finding_style))
+    story.append(Spacer(1, 0.12*inch))
 
-    story.append(Spacer(1, 0.1*inch))
+    # ── Key Points — compact, grounded, backs up the narrative above ─────────
+    findings = report_data.get("findings", [])
+    if findings:
+        story.append(Paragraph("Key Points", ParagraphStyle(
+            "DericKeyPoints", parent=base_styles["Heading3"],
+            textColor=text_grey, fontSize=11, spaceBefore=4, spaceAfter=6,
+        )))
+        for f in findings[:6]:
+            clean = f.encode("ascii", "ignore").decode("ascii").strip() if any(ord(c) > 127 for c in f[:2]) else f
+            clean = clean if clean else f
+            story.append(Paragraph(f"•&nbsp; {clean}", ParagraphStyle(
+                "DericBullet", parent=base_styles["BodyText"],
+                textColor=text_grey, fontSize=9.5, leading=13,
+                leftIndent=10, spaceAfter=3,
+            )))
+
+    story.append(Spacer(1, 0.15*inch))
 
     # ── Visual Analysis — every chart (auto + custom-built), each with its own
     # analyst-level read, branded consistently with the rest of the report ──
@@ -601,30 +664,10 @@ def report_to_pdf(report_data: dict) -> bytes:
             except Exception as exc:
                 story.append(Paragraph(f"{label} — chart could not be rendered ({exc})", insight_style))
 
-    # ── Supporting data tables ───────────────────────────────────────────────
-    def add_df_table(title, frame, max_rows=20):
-        if frame is None or frame.empty:
-            return
-        story.append(Paragraph(title, section_style))
-        limited = frame.head(max_rows).fillna("—").astype(str)
-        data    = [limited.columns.tolist()] + limited.values.tolist()
-        tbl     = Table(data, repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",     (0, 0), (-1, 0), brand_green),
-            ("TEXTCOLOR",      (0, 0), (-1, 0), colors.white),
-            ("FONTNAME",       (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE",       (0, 0), (-1, -1), 7.5),
-            ("GRID",           (0, 0), (-1, -1), 0.3, colors.HexColor("#e5e7eb")),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
-            ("TOPPADDING",     (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING",  (0, 0), (-1, -1), 4),
-        ]))
-        story.append(tbl)
-        story.append(Spacer(1, 0.1*inch))
-
-    add_df_table("Numeric Column Statistics",     report_data.get("numeric_summary"))
-    add_df_table("Categorical Column Statistics", report_data.get("categorical_summary"))
-    add_df_table("Sample Records",                report_data.get("sample_rows"))
+    # Note: raw numeric/categorical stat tables and sample-row dumps are
+    # intentionally NOT included here — this is a business report, not a
+    # data export. Full data remains available via the CSV/Excel export
+    # buttons on the Cleaning page for anyone who needs the raw numbers.
 
     decorator = _make_page_decorator()
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)

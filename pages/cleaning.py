@@ -5,6 +5,16 @@ import dash
 from dash import html, dcc, dash_table, Input, Output, State, no_update, ctx, ALL
 import pandas as pd
 from services.export_utils import dataframe_to_excel_bytes
+import re as _re
+from datetime import datetime as _datetime
+
+
+def _timestamped_name(raw_name, ext):
+    base = str(raw_name).split("  ")[0]
+    base = _re.sub(r"\.(csv|xlsx|xls|json|db|sqlite)$", "", base, flags=_re.IGNORECASE)
+    clean = _re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_") or "dataset"
+    ts = _datetime.now().strftime("%Y%m%d_%H%M")
+    return f"dericbi_{clean}_{ts}.{ext}"
 
 dash.register_page(__name__, path="/cleaning", name="Data Cleaning")
 
@@ -454,7 +464,8 @@ def clean_data(apply_clicks, rollback_clicks,
 def export_csv(n, shared_dataset):
     if not shared_dataset or not shared_dataset.get("records"): return None
     df = pd.DataFrame(shared_dataset["records"])
-    return dcc.send_data_frame(df.to_csv, "cleaned_dataset.csv", index=False)
+    filename = _timestamped_name(shared_dataset.get("filename", "dataset"), "csv")
+    return dcc.send_data_frame(df.to_csv, filename, index=False)
 
 
 @dash.callback(
@@ -467,4 +478,5 @@ def export_xlsx(n, shared_dataset):
     if not shared_dataset or not shared_dataset.get("records"): return None
     df = pd.DataFrame(shared_dataset["records"])
     b = dataframe_to_excel_bytes(df)
-    return dcc.send_bytes(lambda s: s.write(b), "cleaned_dataset.xlsx")
+    filename = _timestamped_name(shared_dataset.get("filename", "dataset"), "xlsx")
+    return dcc.send_bytes(lambda s: s.write(b), filename)

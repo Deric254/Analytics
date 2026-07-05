@@ -228,4 +228,14 @@ def dl_pdf(_, store):
         return None
 
     pdf_bytes = report_to_pdf(rd)
-    return dcc.send_bytes(lambda s: s.write(pdf_bytes), "dericbi_report.pdf")
+
+    import re
+    from datetime import datetime
+    raw_name = rd.get("overview", {}).get("source", "dataset")
+    base_name = str(raw_name).split("  ")[0]
+    base_name = re.sub(r"\.(csv|xlsx|xls|json|db|sqlite)$", "", base_name, flags=re.IGNORECASE)
+    clean_name = re.sub(r"[^A-Za-z0-9_-]+", "_", base_name).strip("_") or "dataset"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    filename = f"dericbi_report_{clean_name}_{timestamp}.pdf"
+
+    return dcc.send_bytes(lambda s: s.write(pdf_bytes), filename)

@@ -72,8 +72,6 @@ layout = html.Div([
                  style={"display": "flex", "gap": "14px", "flexWrap": "wrap", "marginBottom": "20px"}),
         type="dot"),
 
-    # Auto charts — stored for export
-    dcc.Store(id="viz-charts-store",       storage_type="session"),
     dcc.Loading(html.Div(id="viz-auto"), type="circle"),
 
     # Custom builder
