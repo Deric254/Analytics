@@ -157,13 +157,16 @@ def _auto_findings(df, p, source_name) -> list[str]:
             else:
                 spread_note = f"Performance is consistent (CV={cv:.2f})."
 
-            # 80/20 check
+            # 80/20 check — only meaningful when all values share the same sign
+            # as the total; mixed positive/negative data can push a "share"
+            # figure above 100% or negative, which is accurate but unreadable.
             top20 = s.nlargest(max(1, len(s) // 5))
-            top20_share = top20.sum() / total if total else 0
+            all_same_sign = (s >= 0).all() or (s <= 0).all()
+            top20_share = (top20.sum() / total) if (total and all_same_sign) else 0
             pareto_note = (
                 f" Top 20% of records generate {_pct(top20.sum(), total)} of total {num} — "
                 "protect these disproportionately."
-                if top20_share >= 0.65 else ""
+                if (all_same_sign and top20_share >= 0.65) else ""
             )
 
             findings.append(

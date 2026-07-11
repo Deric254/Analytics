@@ -310,9 +310,19 @@ def _performance_analysis(p: DataProfile) -> list[str]:
         lines.append(f"• Median ({_fmt(s.median())}) >> Mean ({_fmt(s.mean())}) — "
                      "a few very low values drag the average down.")
 
-    # Top 20% contribution
+    # Top 20% contribution — only meaningful when all values share the same
+    # sign as the total; with mixed positive/negative values a "share of
+    # total" figure can exceed 100% or go negative, which is accurate math
+    # but reads as broken. Skip it in that case rather than show a
+    # nonsensical percentage.
     top20 = s.nlargest(max(1, len(s)//5))
-    lines.append(f"• Top 20% of records account for {_pct(top20.sum(), total)} of total {num}.")
+    all_same_sign = (s >= 0).all() or (s <= 0).all()
+    if all_same_sign and total != 0:
+        lines.append(f"• Top 20% of records account for {_pct(top20.sum(), total)} of total {num}.")
+    elif not all_same_sign:
+        lines.append(f"• Values include both positive and negative {num} — "
+                     "concentration share is not meaningful here. "
+                     f"Top single value: {_fmt(s.max())}, lowest: {_fmt(s.min())}.")
 
     # Group breakdown
     if cat:

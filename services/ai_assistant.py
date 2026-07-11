@@ -43,12 +43,19 @@ def build_context(df: pd.DataFrame) -> str:
         f"Key metric: {p.value_col}. Main groups: {', '.join(p.group_cols)}.",
     ]
 
-    # Add quick stats on key metric
-    if p.value_col:
-        s = pd.to_numeric(df2[p.value_col], errors="coerce").dropna()
+    # Add quick stats on the key metric plus up to 2 other numeric columns —
+    # broader grounding so the AI can answer questions about columns beyond
+    # just the single "primary" metric without inventing numbers for them.
+    stat_cols = [c for c in ([p.value_col] if p.value_col else []) + num_cols if c][:3]
+    seen = set()
+    for col in stat_cols:
+        if col in seen or col not in df2.columns:
+            continue
+        seen.add(col)
+        s = pd.to_numeric(df2[col], errors="coerce").dropna()
         if not s.empty:
             lines.append(
-                f"{p.value_col} stats: total={s.sum():,.2f}, mean={s.mean():,.2f}, "
+                f"{col} stats: total={s.sum():,.2f}, mean={s.mean():,.2f}, "
                 f"min={s.min():,.2f}, max={s.max():,.2f}."
             )
 
@@ -92,27 +99,44 @@ GEMINI_MODEL = "gemini-flash-latest"
 
 
 def _call_gemini(question: str, context: str) -> tuple[str, str]:
-    """Returns (answer, error). answer is None if the call failed; error explains why."""
+    """
+    Returns (answer, error). answer is None if the call failed; error explains why.
+    Retries once on a transient failure (503 "model overloaded" or a timeout) —
+    these usually clear within a second or two, so one retry avoids an
+    unnecessary drop to the local engine for what is often a momentary blip.
+    """
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         return None, "no key configured"
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
-        payload = {
-            "contents": [{
-                "parts": [{"text": _system_prompt(context) + f"\n\nUser: {question}"}]
-            }],
-            "generationConfig": {"maxOutputTokens": 512, "temperature": 0.4},
-        }
-        r = requests.post(url, json=payload, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip(), None
-    except requests.exceptions.HTTPError as e:
-        return None, f"Gemini API error: {e.response.status_code} {e.response.text[:150]}"
-    except Exception as e:
-        return None, f"Gemini call failed: {e}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
+    payload = {
+        "contents": [{
+            "parts": [{"text": _system_prompt(context) + f"\n\nUser: {question}"}]
+        }],
+        "generationConfig": {"maxOutputTokens": 512, "temperature": 0.4},
+    }
+
+    last_error = None
+    for attempt in range(2):
+        try:
+            r = requests.post(url, json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip(), None
+        except requests.exceptions.HTTPError as e:
+            last_error = f"Gemini is temporarily busy (HTTP {e.response.status_code})"
+            if e.response.status_code != 503 or attempt == 1:
+                break
+        except requests.exceptions.Timeout:
+            last_error = "Gemini took too long to respond"
+            if attempt == 1:
+                break
+        except Exception as e:
+            last_error = f"Gemini connection issue: {e}"
+            break
+
+    return None, last_error
 
 
 def _call_groq(question: str, context: str) -> tuple[str, str]:
@@ -177,8 +201,13 @@ def _call_openrouter(question: str, context: str) -> tuple[str, str]:
 def _local_fallback(question: str, df: pd.DataFrame, reason: str = "") -> str:
     """Use the local BI engine when no API key works."""
     result = generate_insight(question, df)
-    note = f" ({reason})" if reason else ""
-    return result + f"\n\n*(Using local analytics engine{note}. Add GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_KEY to unlock full AI.)*"
+    if reason == "no AI API key configured":
+        note = "Using the local analytics engine. Add an AI API key to unlock full AI."
+    elif reason:
+        note = f"Using the local analytics engine — {reason}. Try again in a moment."
+    else:
+        note = "Using the local analytics engine. Add an AI API key to unlock full AI."
+    return result + "\n\n---\n" + note
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

@@ -218,11 +218,12 @@ def _build_column_profile(df):
 
 
 def _fmt(v):
+    """Matches the 2-decimal, comma-separated format used everywhere else
+    in the app (services/insights_agent.py, services/export_utils.py) so
+    numbers look identical across every page."""
     if pd.isna(v): return "N/A"
-    if isinstance(v, (float, np.floating)):
-        if abs(v) >= 1_000_000: return f"{v/1_000_000:,.1f}M"
-        if abs(v) >= 1_000:     return f"{v:,.1f}"
-        return f"{v:.2f}"
+    if isinstance(v, (float, np.floating, int, np.integer)):
+        return f"{float(v):,.2f}"
     return f"{v}"
 
 

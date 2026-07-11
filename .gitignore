@@ -7,3 +7,10 @@ venv/
 # Binary assets — served online, not committed to git
 assets/logo.png
 assets/favicon.ico
+
+# Desktop app build artifacts — never commit these, GitHub Actions
+# regenerates them fresh on every build
+desktop/node_modules/
+desktop/dist/
+# Note: desktop/build/icon.ico is intentionally NOT ignored — commit your
+# real icon there once you have one, so GitHub Actions can find it.

@@ -1,0 +1,49 @@
+name: Build and Release DericBI Desktop Installer
+
+# Fully automated: any push that touches desktop/ builds the installer AND
+# publishes it to GitHub Releases automatically — using electron-builder's
+# own --publish flag, NOT a generic release action. This matters: only
+# electron-builder's native publish step generates the latest.yml file that
+# electron-updater (wired into main.js) reads to detect new versions. A
+# generic "attach a file to a release" action does not produce that file,
+# so in-app auto-update would silently never find anything.
+#
+# Pushing to app.py, pages/, services/ (the Render web app) never triggers
+# this — completely separate from your Render deploy.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/build-desktop.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # required for electron-builder to create the Release
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build and publish to GitHub Releases
+        working-directory: desktop
+        # electron-builder creates the git tag (v<version> from package.json),
+        # the GitHub Release, uploads the installer AND latest.yml, all in
+        # this one command. GH_TOKEN is the built-in Actions token — no
+        # secret needs to be created manually.
+        run: npm run publish:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

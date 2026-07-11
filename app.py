@@ -162,7 +162,7 @@ ai_button = html.Div([
                     "borderRadius": "8px", "fontSize": "13px", "marginRight": "6px",
                 },
             ),
-            html.Button("→", id="ai-send-btn", n_clicks=0, style={
+            html.Button("→", id="ai-send-btn", n_clicks=0, disabled=False, style={
                 "width": "36px", "height": "36px", "borderRadius": "8px", "border": "none",
                 "background": "#3e8865", "color": "#fff", "cursor": "pointer", "fontWeight": "700",
             }),
@@ -226,6 +226,41 @@ def highlight_active_nav(pathname):
         is_active = (pathname == href) or (pathname is None and href == "/")
         styles.append(active_style if is_active else base_style)
     return styles
+
+
+# ── AI send button — instant disable on click, browser-side only ──────────────
+# Prevents duplicate submissions while a request is in flight without adding
+# any server round-trip or touching the actual send/receive logic.
+app.clientside_callback(
+    """
+    function(n_clicks, n_submit) {
+        const btn = document.getElementById('ai-send-btn');
+        const inp = document.getElementById('ai-input');
+        if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+        if (inp) { inp.disabled = true; }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("ai-send-btn", "title"),
+    Input("ai-send-btn", "n_clicks"),
+    Input("ai-input",    "n_submit"),
+    prevent_initial_call=True,
+)
+
+app.clientside_callback(
+    """
+    function(children) {
+        const btn = document.getElementById('ai-send-btn');
+        const inp = document.getElementById('ai-input');
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+        if (inp) { inp.disabled = false; }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("ai-input", "title"),
+    Input("ai-messages", "children"),
+    prevent_initial_call=True,
+)
 
 
 # ── Mobile sidebar toggle — pure browser-side, touches no Python state ────────
@@ -365,14 +400,40 @@ def send_ai_message(n_clicks, n_submit, question, history, shared_dataset):
             "borderRadius": "12px 12px 2px 12px", "marginBottom": "6px",
             "maxWidth": "85%", "marginLeft": "auto", "fontSize": "12.5px",
         }))
-        bubbles.append(html.Div(turn["a"], style={
+        bubbles.append(html.Div(_render_ai_text(turn["a"]), style={
             "background": "#fff", "color": "#374151", "padding": "8px 12px",
             "borderRadius": "12px 12px 12px 2px", "marginBottom": "12px",
             "maxWidth": "90%", "border": "1px solid #e5e7eb", "fontSize": "12.5px",
-            "whiteSpace": "pre-wrap", "lineHeight": "1.5",
+            "lineHeight": "1.5",
         }))
 
     return bubbles, history, ""
+
+
+def _render_ai_text(text: str):
+    """
+    Turn plain **bold** markdown and a divider line (---) from the AI or the
+    local fallback note into clean Dash elements — no raw asterisks shown.
+    """
+    lines = text.split("\n")
+    children = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            children.append(html.Br())
+            continue
+        if stripped == "---":
+            children.append(html.Hr(style={
+                "border": "none", "borderTop": "1px solid #e5e7eb", "margin": "8px 0",
+            }))
+            continue
+        parts = stripped.split("**")
+        if len(parts) > 1:
+            spans = [html.Strong(p) if i % 2 == 1 else p for i, p in enumerate(parts)]
+            children.append(html.Div(spans, style={"marginBottom": "3px"}))
+        else:
+            children.append(html.Div(stripped, style={"marginBottom": "3px"}))
+    return children
 
 
 @app.callback(
