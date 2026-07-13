@@ -154,6 +154,15 @@ ai_button = html.Div([
         ),
 
         html.Div([
+            html.Button("📋 Quick Report", id="ai-quick-report-btn", n_clicks=0, style={
+                "width": "100%", "padding": "8px 12px", "borderRadius": "8px",
+                "border": "1px solid #3e8865", "background": "#f0fdf4", "color": "#2d6649",
+                "cursor": "pointer", "fontWeight": "600", "fontSize": "12px",
+                "marginBottom": "8px",
+            }),
+        ], style={"padding": "0 14px"}),
+
+        html.Div([
             dcc.Input(
                 id="ai-input", type="text", placeholder="Ask about your data, or anything...",
                 n_submit=0,
@@ -233,17 +242,20 @@ def highlight_active_nav(pathname):
 # any server round-trip or touching the actual send/receive logic.
 app.clientside_callback(
     """
-    function(n_clicks, n_submit) {
+    function(n_clicks, n_submit, quick_report_clicks) {
         const btn = document.getElementById('ai-send-btn');
         const inp = document.getElementById('ai-input');
+        const qbtn = document.getElementById('ai-quick-report-btn');
         if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
         if (inp) { inp.disabled = true; }
+        if (qbtn) { qbtn.disabled = true; qbtn.style.opacity = '0.5'; }
         return window.dash_clientside.no_update;
     }
     """,
     Output("ai-send-btn", "title"),
     Input("ai-send-btn", "n_clicks"),
     Input("ai-input",    "n_submit"),
+    Input("ai-quick-report-btn", "n_clicks"),
     prevent_initial_call=True,
 )
 
@@ -252,8 +264,10 @@ app.clientside_callback(
     function(children) {
         const btn = document.getElementById('ai-send-btn');
         const inp = document.getElementById('ai-input');
+        const qbtn = document.getElementById('ai-quick-report-btn');
         if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
         if (inp) { inp.disabled = false; }
+        if (qbtn) { qbtn.disabled = false; qbtn.style.opacity = '1'; }
         return window.dash_clientside.no_update;
     }
     """,
@@ -378,12 +392,29 @@ def toggle_ai_panel(open_clicks, close_clicks, is_open):
     Output("ai-input",    "value"),
     Input("ai-send-btn",  "n_clicks"),
     Input("ai-input",     "n_submit"),
+    Input("ai-quick-report-btn", "n_clicks"),
     State("ai-input",       "value"),
     State("ai-history",     "data"),
     State("shared-dataset",  "data"),
     prevent_initial_call=True,
 )
-def send_ai_message(n_clicks, n_submit, question, history, shared_dataset):
+def send_ai_message(n_clicks, n_submit, quick_report_clicks, question, history, shared_dataset):
+    triggered = dash.ctx.triggered_id
+
+    if triggered == "ai-quick-report-btn":
+        question = (
+            "Give me a complete business status report on this data, structured exactly as:\n"
+            "1. SUMMARY — what this dataset covers and its overall health in 2-3 sentences.\n"
+            "2. OUTSTANDING — what's pending, incomplete, or still needs attention.\n"
+            "3. FAILED / AT RISK — what's underperforming, broken, or a problem right now.\n"
+            "4. NEXT STEP — the single most reasonable action to take right now, and why.\n"
+            "5. FORECAST — a short, reasoned outlook based on the trend in this data.\n"
+            "Keep each section to 1-3 sentences. Be direct and specific to the actual numbers."
+        )
+        display_label = "📋 Quick Report"
+    else:
+        display_label = (question or "").strip()
+
     if not question or not question.strip():
         return dash.no_update, dash.no_update, dash.no_update
 
@@ -391,7 +422,7 @@ def send_ai_message(n_clicks, n_submit, question, history, shared_dataset):
     df = pd.DataFrame(shared_dataset["records"]) if shared_dataset and shared_dataset.get("records") else None
 
     answer  = ai_ask(question.strip(), df)
-    history = (history or []) + [{"q": question.strip(), "a": answer}]
+    history = (history or []) + [{"q": display_label, "a": answer}]
 
     bubbles = []
     for turn in history[-10:]:
@@ -412,27 +443,86 @@ def send_ai_message(n_clicks, n_submit, question, history, shared_dataset):
 
 def _render_ai_text(text: str):
     """
-    Turn plain **bold** markdown and a divider line (---) from the AI or the
-    local fallback note into clean Dash elements — no raw asterisks shown.
+    Converts common markdown the AI produces into clean Dash elements:
+    headers (#, ##, ###), bullet lists (-, *), numbered lists (1.), bold
+    (**text**), italic (*text*), inline code (`text`), and a divider (---).
+    Nothing is left as raw markdown symbols in the rendered output.
     """
+    import re
+
     lines = text.split("\n")
     children = []
-    for line in lines:
-        stripped = line.strip()
+
+    def render_inline(s):
+        """Handle **bold**, *italic*, and `code` within a single line."""
+        # Tokenize on bold/italic/code markers without losing the surrounding text.
+        pattern = re.compile(r"(\*\*.+?\*\*|`.+?`|\*[^*]+?\*)")
+        parts = pattern.split(s)
+        spans = []
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith("**") and part.endswith("**"):
+                spans.append(html.Strong(part[2:-2]))
+            elif part.startswith("`") and part.endswith("`"):
+                spans.append(html.Code(part[1:-1], style={
+                    "background": "#f3f4f6", "padding": "1px 5px",
+                    "borderRadius": "4px", "fontSize": "11.5px",
+                }))
+            elif part.startswith("*") and part.endswith("*") and len(part) > 2:
+                spans.append(html.Em(part[1:-1]))
+            else:
+                spans.append(part)
+        return spans if spans else [s]
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+
         if not stripped:
             children.append(html.Br())
             continue
+
         if stripped == "---":
             children.append(html.Hr(style={
                 "border": "none", "borderTop": "1px solid #e5e7eb", "margin": "8px 0",
             }))
             continue
-        parts = stripped.split("**")
-        if len(parts) > 1:
-            spans = [html.Strong(p) if i % 2 == 1 else p for i, p in enumerate(parts)]
-            children.append(html.Div(spans, style={"marginBottom": "3px"}))
-        else:
-            children.append(html.Div(stripped, style={"marginBottom": "3px"}))
+
+        # Headers: # / ## / ### — strip the hashes, render as bold with spacing
+        header_match = re.match(r"^(#{1,4})\s+(.*)", stripped)
+        if header_match:
+            level = len(header_match.group(1))
+            header_text = header_match.group(2)
+            font_size = {1: "14px", 2: "13.5px", 3: "13px", 4: "12.5px"}.get(level, "13px")
+            children.append(html.Div(render_inline(header_text), style={
+                "fontWeight": "700", "fontSize": font_size, "color": "#1f2937",
+                "marginTop": "8px", "marginBottom": "4px",
+            }))
+            continue
+
+        # Bullet lists: - item  or  * item
+        bullet_match = re.match(r"^[-*]\s+(.*)", stripped)
+        if bullet_match:
+            children.append(html.Div([
+                html.Span("•  ", style={"color": "#3e8865", "fontWeight": "700"}),
+                *render_inline(bullet_match.group(1)),
+            ], style={"marginBottom": "3px", "paddingLeft": "6px"}))
+            continue
+
+        # Numbered lists: 1. item
+        numbered_match = re.match(r"^(\d+)\.\s+(.*)", stripped)
+        if numbered_match:
+            children.append(html.Div([
+                html.Span(f"{numbered_match.group(1)}.  ", style={
+                    "color": "#3e8865", "fontWeight": "700",
+                }),
+                *render_inline(numbered_match.group(2)),
+            ], style={"marginBottom": "3px", "paddingLeft": "6px"}))
+            continue
+
+        # Plain line — still needs inline bold/italic/code handling
+        children.append(html.Div(render_inline(stripped), style={"marginBottom": "3px"}))
+
     return children
 
 
