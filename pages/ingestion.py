@@ -236,12 +236,31 @@ def _error_msg(text):
                                   "padding": "10px 14px", "borderRadius": "8px", "border": "1px solid rgba(239,68,68,0.3)"})
 
 
+def _decode_csv_bytes(decoded: bytes) -> str:
+    """
+    Decode uploaded CSV bytes without silently corrupting non-UTF-8 files.
+    Excel-exported CSVs are very commonly Windows-1252/Latin-1, not UTF-8 —
+    the previous code used errors="ignore", which silently DROPPED any byte
+    that didn't decode as UTF-8 (e.g. curly quotes, accented names, £/€
+    signs) with no warning at all. This tries the encodings most likely to
+    be fully correct first, and only falls back to a lossy replace (which
+    at least leaves a visible "?" instead of silently deleting data) if
+    nothing else works.
+    """
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return decoded.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return decoded.decode("utf-8", errors="replace")
+
+
 def parse_contents(contents, filename):
     _, content_string = contents.split(",")
     decoded = base64.b64decode(content_string)
     try:
         if filename.endswith(".csv"):
-            df = pd.read_csv(io.StringIO(decoded.decode("utf-8", errors="ignore")))
+            df = pd.read_csv(io.StringIO(_decode_csv_bytes(decoded)))
         elif filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(io.BytesIO(decoded), engine="openpyxl")
         else:

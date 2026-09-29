@@ -105,12 +105,8 @@ DericBI/
 ├── services/
 │   ├── insights_agent.py   ← rebuilt: zero API keys
 │   ├── export_utils.py
-│   ├── report_generator.py
-│   └── ...
-└── components/
-    ├── chart_card.py
-    ├── kpi_card.py
-    └── ...
+│   ├── ai_assistant.py
+│   └── sample_data.py
 ```
 
 ---

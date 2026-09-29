@@ -14,7 +14,3 @@ DB_CONNECTION_STRING = os.getenv(
     "DB_CONNECTION_STRING",
     "postgresql://user:password@localhost:5432/dericbi_db",
 )
-
-# ── HuggingFace (no longer used — insights engine is fully local) ─────────────
-HUGGINGFACE_API_KEY = ""
-HUGGINGFACE_MODEL   = ""
