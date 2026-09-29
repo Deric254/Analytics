@@ -1,6 +1,6 @@
 {
   "name": "dericbi-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DericBI Analytics Engine — Desktop App",
   "main": "main.js",
   "author": "Deric Marangu",
@@ -31,8 +31,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "REPLACE_WITH_YOUR_GITHUB_USERNAME",
-      "repo": "REPLACE_WITH_YOUR_REPO_NAME"
+      "owner": "Deric254",
+      "repo": "Analytics"
     },
     "win": {
       "target": [
