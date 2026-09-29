@@ -32,7 +32,8 @@
     "publish": {
       "provider": "github",
       "owner": "Deric254",
-      "repo": "Analytics"
+      "repo": "Analytics",
+      "releaseType": "release"
     },
     "win": {
       "target": [
